@@ -690,7 +690,8 @@
         showInjuries: true,
         showStandings: true,
         autoRefresh: true,
-        useMLThresholds: true // NUOVO: usa soglie ML invece di manuali
+        useMLThresholds: true, // NUOVO: usa soglie ML invece di manuali
+        useContextPressure: false // NUOVO: Context Pressure per fine stagione (default OFF)
       })),
       settingsOpen: false,
 
@@ -2491,6 +2492,102 @@
       return { difficulty, pct, stake, label, capital: cfg.capital };
     }
     
+    // ═══ CONTEXT PRESSURE RENDER ═══
+    function renderContextPressure(match, d) {
+      try {
+        var cp = d.contextPressure;
+        if (!cp) return '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">Dati classifica non disponibili per questa partita.</div>';
+        
+        var enabled = state.settings.useContextPressure;
+        
+        var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
+        
+        // Header
+        var headerBg = 'rgba(' + (cp.enabled ? (cp.icon === '🔥' ? '239,68,68' : cp.icon === '⚠️' ? '245,158,11' : cp.icon === '⚽' || cp.icon === '🎯' ? '0,212,255' : '148,163,184') : '148,163,184') + ',0.08)';
+        html += '<div style="padding:14px;background:' + headerBg + ';border:1.5px solid ' + cp.color + '30;border-radius:12px;">';
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
+        html += '<div style="display:flex;align-items:center;gap:10px;">';
+        html += '<span style="font-size:1.4rem;">' + cp.icon + '</span>';
+        html += '<div><div style="font-size:0.85rem;font-weight:800;color:' + cp.color + ';">' + cp.context + '</div>';
+        html += '<div style="font-size:0.6rem;color:var(--text-dark);">Context Pressure Detector</div></div></div>';
+        
+        if (!enabled) {
+          html += '<span style="font-size:0.55rem;background:rgba(148,163,184,0.15);color:#94a3b8;padding:4px 10px;border-radius:10px;font-weight:700;">🔒 DISATTIVATO</span>';
+        } else if (cp.enabled) {
+          html += '<span style="font-size:0.55rem;background:' + cp.color + '20;color:' + cp.color + ';padding:4px 10px;border-radius:10px;font-weight:700;">✅ ATTIVO</span>';
+        }
+        html += '</div>';
+        
+        // Posizioni squadre
+        if (d.homePosition && d.awayPosition) {
+          html += '<div style="display:flex;gap:8px;margin-top:10px;">';
+          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;">';
+          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + esc(match.home.name) + '</div>';
+          html += '<div style="font-size:1rem;font-weight:900;color:white;">#' + d.homePosition.position + '</div>';
+          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + d.homePosition.points + ' pt · ' + d.homePosition.motivationText + '</div>';
+          html += '</div>';
+          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;">';
+          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + esc(match.away.name) + '</div>';
+          html += '<div style="font-size:1rem;font-weight:900;color:white;">#' + d.awayPosition.position + '</div>';
+          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + d.awayPosition.points + ' pt · ' + d.awayPosition.motivationText + '</div>';
+          html += '</div></div>';
+        }
+        html += '</div>';
+        
+        // Segnali
+        if (cp.signals && cp.signals.length > 0) {
+          html += '<div style="display:flex;flex-direction:column;gap:5px;">';
+          cp.signals.forEach(function(s) {
+            html += '<div style="padding:8px 10px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;font-size:0.68rem;color:var(--text-gray);">▸ ' + s + '</div>';
+          });
+          html += '</div>';
+        }
+        
+        // Moltiplicatori xG (solo se attivo)
+        if (enabled && cp.enabled) {
+          html += '<div style="padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border-left:3px solid ' + cp.color + ';">';
+          html += '<div style="font-size:0.65rem;font-weight:800;color:' + cp.color + ';margin-bottom:6px;">📊 IMPATTO SUL MODELLO:</div>';
+          html += '<div style="display:flex;gap:12px;font-size:0.62rem;color:var(--text-gray);">';
+          if (cp.homeBoost !== 1.0) html += '<span>xG ' + esc(match.home.name) + ': <b style="color:' + (cp.homeBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.homeBoost.toFixed(2) + '</b></span>';
+          if (cp.awayBoost !== 1.0) html += '<span>xG ' + esc(match.away.name) + ': <b style="color:' + (cp.awayBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.awayBoost.toFixed(2) + '</b></span>';
+          if (cp.totalBoost !== 1.0) html += '<span>xG totale: <b style="color:' + (cp.totalBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.totalBoost.toFixed(2) + '</b></span>';
+          html += '</div></div>';
+        }
+        
+        // Info se disattivato
+        if (!enabled) {
+          html += '<div style="padding:10px;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.15);border-radius:10px;font-size:0.62rem;color:var(--text-gray);">';
+          html += '💡 <b>Context Pressure è attualmente disattivato.</b> I dati sono mostrati a scopo informativo ma non modificano i pronostici. Per attivarlo, vai su Impostazioni ⚙️.';
+          html += '</div>';
+        }
+        
+        html += '</div>';
+        return html;
+      } catch (e) {
+        console.warn('renderContextPressure error:', e.message);
+        return '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;">Errore nel caricamento del Context Pressure.</div>';
+      }
+    }
+    
+    // ═══ STAKE INDICATOR — pallino colorato compatto ═══
+    function renderStakeIndicator(consensus, regression, trapScore, confidence) {
+      try {
+        var cfg = state.stakeConfig;
+        if (!cfg || cfg.capital <= 0) return '';
+        var diff = calculateMatchDifficulty(consensus, regression, trapScore, confidence, false);
+        var adv = getStakeAdvice(diff);
+        var colors = { 1: '#ef4444', 2: '#f59e0b', 3: '#10b981' };
+        var icons = { 1: '🔴', 2: '🟡', 3: '🟢' };
+        var c = colors[diff];
+        var stake = (cfg.capital * adv.pct / 100).toFixed(0);
+        
+        return '<div title="Stake Advisor: ' + adv.label + ' — €' + stake + ' (' + adv.pct + '%)" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:' + c + '15;border:1.5px solid ' + c + '40;border-radius:20px;cursor:help;">' +
+          '<span style="font-size:0.85rem;">' + icons[diff] + '</span>' +
+          '<div style="font-size:0.6rem;font-weight:800;color:' + c + ';line-height:1;">€' + stake + '</div>' +
+        '</div>';
+      } catch (e) { return ''; }
+    }
+    
     function renderStakeAdvisor(consensus, regression, trapScore, confidence) {
       const cfg = state.stakeConfig;
       if (!cfg || cfg.capital <= 0) return '';
@@ -4261,6 +4358,159 @@ async function analyzeMatch(match) {
     }
 
     // === ALGORITMO AVANZATO ===
+    // ═══ CONTEXT PRESSURE DETECTOR ═══
+    // Analizza posizione in classifica e pressione fine stagione
+    // RESTITUISCE SEMPRE UN OGGETTO VALIDO — zero crash anche senza dati
+    function calculateContextPressure(match, homePosition, awayPosition) {
+      var result = {
+        enabled: false,        // true solo se ci sono dati sufficienti
+        homeBoost: 1.0,        // moltiplicatore xG casa (default = neutro)
+        awayBoost: 1.0,        // moltiplicatore xG ospite (default = neutro)
+        totalBoost: 1.0,       // moltiplicatore xG totale (default = neutro)
+        drawBoost: 0,          // punti aggiuntivi al pareggio (default = 0)
+        context: 'Normale',    // descrizione contesto
+        icon: '⚪',
+        color: '#94a3b8',
+        signals: []            // segnali testuali per il pannello
+      };
+
+      try {
+        if (!homePosition || !awayPosition) {
+          result.context = 'Dati classifica non disponibili';
+          result.icon = '⚫';
+          return result;
+        }
+
+        var played = (homePosition.played || 0) + (awayPosition.played || 0);
+        var totalTeams = homePosition.totalTeams || 20;
+        var homeRank = homePosition.position || 10;
+        var awayRank = awayPosition.position || 10;
+
+        // Stima giornate totali: totalTeams × 2 - 2 (andata+ritorno)
+        var totalMatchdays = (totalTeams * 2) - 2;
+        var avgPlayed = played / 2;
+        var matchdaysLeft = totalMatchdays - avgPlayed;
+
+        // Solo ultimi 10 turni: Context Pressure attivo
+        if (matchdaysLeft > 10) {
+          result.context = 'Inizio/mezzo stagione — pressione bassa';
+          result.icon = '🟢';
+          result.color = '#10b981';
+          result.signals.push('Stagione non ancora decisiva — xG non modificati');
+          return result;
+        }
+
+        result.enabled = true;
+
+        // === ZONE CALDE ===
+        var relegationZone = totalTeams - 2;
+        var playoutZone = totalTeams - 5;
+
+        var homeInRelegation = homeRank >= relegationZone;
+        var awayInRelegation = awayRank >= relegationZone;
+        var homeNearRelegation = homeRank >= playoutZone && homeRank < relegationZone;
+        var awayNearRelegation = awayRank >= playoutZone && awayRank < relegationZone;
+
+        var homeInChampions = homeRank <= 4;
+        var awayInChampions = awayRank <= 4;
+        var homeChasingEuropa = homeRank >= 5 && homeRank <= 8;
+        var awayChasingEuropa = awayRank >= 5 && awayRank <= 8;
+
+        var homeMidTable = homeRank > 8 && homeRank < playoutZone;
+        var awayMidTable = awayRank > 8 && awayRank < playoutZone;
+
+        // === SCENARI ===
+
+        // Scontro diretto salvezza
+        if ((homeInRelegation || homeNearRelegation) && (awayInRelegation || awayNearRelegation)) {
+          result.totalBoost = 0.85;
+          result.drawBoost = 8;
+          result.context = '🔥 Scontro Salvezza Diretto';
+          result.icon = '🔥';
+          result.color = '#ef4444';
+          result.signals.push('Entrambe lottano per non retrocedere — partita tesa, molti falli, pochi gol');
+          result.signals.push('xG totale ridotto del 15%, boost pareggio +8 punti');
+          return result;
+        }
+
+        // Una in lotta salvezza contro rilassata
+        if ((homeInRelegation || homeNearRelegation) && !awayInRelegation && !awayNearRelegation) {
+          result.homeBoost = 1.05; // casa gioca con più determinazione
+          result.awayBoost = 0.92;
+          result.context = '⚠️ ' + match.home.name + ' in lotta salvezza';
+          result.icon = '⚠️';
+          result.color = '#f59e0b';
+          result.signals.push(match.home.name + ' lotta per la sopravvivenza — motivazione massima');
+          result.signals.push(match.away.name + ' senza obiettivi — rischio approccio rilassato');
+          return result;
+        }
+        if ((awayInRelegation || awayNearRelegation) && !homeInRelegation && !homeNearRelegation && !homeInChampions) {
+          result.awayBoost = 1.05;
+          result.homeBoost = 0.92;
+          result.context = '⚠️ ' + match.away.name + ' in lotta salvezza';
+          result.icon = '⚠️';
+          result.color = '#f59e0b';
+          result.signals.push(match.away.name + ' lotta per la sopravvivenza — motivazione massima');
+          result.signals.push(match.home.name + ' senza obiettivi — rischio approccio rilassato');
+          return result;
+        }
+
+        // Scontro diretto Champions/Europa
+        if ((homeInChampions || homeChasingEuropa) && (awayInChampions || awayChasingEuropa)) {
+          result.totalBoost = 1.10;
+          result.context = '⚽ Scontro per l\'Europa';
+          result.icon = '⚽';
+          result.color = '#00d4ff';
+          result.signals.push('Entrambe in corsa per Champions/Europa — partita aperta');
+          result.signals.push('xG totale aumentato del 10% — attacchi a tutta');
+          return result;
+        }
+
+        // Una in corsa Champions contro salva
+        if (homeInChampions && awayMidTable) {
+          result.homeBoost = 1.12;
+          result.context = '🎯 ' + match.home.name + ' punta Champions';
+          result.icon = '🎯';
+          result.color = '#00d4ff';
+          result.signals.push(match.home.name + ' deve vincere per la zona Champions');
+          result.signals.push(match.away.name + ' tranquilla a metà classifica');
+          return result;
+        }
+        if (awayInChampions && homeMidTable) {
+          result.awayBoost = 1.12;
+          result.context = '🎯 ' + match.away.name + ' punta Champions';
+          result.icon = '🎯';
+          result.color = '#00d4ff';
+          result.signals.push(match.away.name + ' deve vincere per la zona Champions');
+          result.signals.push(match.home.name + ' tranquilla a metà classifica');
+          return result;
+        }
+
+        // Entrambe tranquille a metà
+        if (homeMidTable && awayMidTable) {
+          result.totalBoost = 0.95;
+          result.context = '😐 Metà Classifica Tranquilla';
+          result.icon = '😐';
+          result.color = '#94a3b8';
+          result.signals.push('Entrambe senza obiettivi particolari');
+          result.signals.push('xG totale leggermente ridotto — partita di routine');
+          return result;
+        }
+
+        // Default: pressione neutra
+        result.context = 'Contesto Neutro';
+        result.icon = '⚪';
+        return result;
+
+      } catch (e) {
+        console.warn('Context Pressure error:', e.message);
+        // In caso di errore, ritorna valori neutri (zero impatto)
+        result.enabled = false;
+        result.context = 'Errore calcolo contesto';
+        return result;
+      }
+    }
+
     function buildAnalysis(match, homeStats, awayStats, h2h, apiPred, fsMatch, homeForm, awayForm, extraData = {}) {
       const homeData = extractTeamData(homeStats, 'home');
       const awayData = extractTeamData(awayStats, 'away');
@@ -4345,6 +4595,27 @@ async function analyzeMatch(match) {
       
       // NOTA: Classifica e Infortuni sono mostrati come INFO ma NON modificano i calcoli
       // per mantenere coerenza con i pronostici storici
+      
+      // ═══ CONTEXT PRESSURE (opt-in via Settings) ═══
+      // Attivo SOLO se settings.useContextPressure === true
+      // Se disattivato: xG NON modificati (comportamento identico al precedente)
+      var contextPressure = null;
+      try {
+        contextPressure = calculateContextPressure(match, homePosition, awayPosition);
+        if (state.settings.useContextPressure && contextPressure && contextPressure.enabled) {
+          homeXG *= contextPressure.homeBoost;
+          awayXG *= contextPressure.awayBoost;
+          var globalMult = contextPressure.totalBoost;
+          if (globalMult !== 1.0) {
+            homeXG *= globalMult;
+            awayXG *= globalMult;
+          }
+          console.log('🎯 Context Pressure applicato:', contextPressure.context, '| casa x' + contextPressure.homeBoost.toFixed(2), 'ospite x' + contextPressure.awayBoost.toFixed(2), 'totale x' + globalMult.toFixed(2));
+        }
+      } catch (e) {
+        console.warn('Context Pressure error, xG non modificati:', e.message);
+        contextPressure = null;
+      }
       
       // Home advantage (realistico: studi mostrano ~+6% casa, ~-5% trasferta)
       homeXG *= 1.06;  // +6% vantaggio casa (conservativo e realistico)
@@ -4468,7 +4739,8 @@ async function analyzeMatch(match) {
         lineupsAvailable: lineupsAvailable || false,
         bookmakerOdds: bookmakerOdds || null,
         homeFatigue: homeFatigue || 1.0,
-        awayFatigue: awayFatigue || 1.0
+        awayFatigue: awayFatigue || 1.0,
+        contextPressure: contextPressure || null
       };
     }
 
@@ -9783,6 +10055,14 @@ async function analyzeMatch(match) {
               <div class="settings-toggle ${s.autoRefresh ? 'active' : ''}" 
                 onclick="toggleSetting('autoRefresh')"></div>
             </div>
+            <div class="settings-row">
+              <span class="settings-label">🎯 Context Pressure (fine stagione)</span>
+              <div class="settings-toggle ${s.useContextPressure ? 'active' : ''}" 
+                onclick="toggleSetting('useContextPressure')"></div>
+            </div>
+            <div style="font-size:0.6rem;color:var(--text-dark);padding:4px 0 0 0;line-height:1.4;">
+              💡 Context Pressure modifica gli xG nelle <b>ultime 10 giornate</b> in base a lotta salvezza/Champions/Europa. Default: OFF per mantenere pronostici storici coerenti.
+            </div>
           </div>
           
           <div class="settings-section">
@@ -10045,6 +10325,24 @@ async function analyzeMatch(match) {
     function toggleSetting(key) {
       state.settings[key] = !state.settings[key];
       saveSettings();
+      // Se viene toggled Context Pressure, invalida la cache analisi
+      // in modo che la prossima apertura della partita ricalcoli i valori
+      if (key === 'useContextPressure') {
+        try {
+          analysisCache.clear();
+          state.analysis = null;
+          state.oddsLab = null;
+          state.valueBets = null;
+          state.regressionScore = null;
+          state.consensus = null;
+          console.log('🔄 Cache analisi svuotata — Context Pressure toggle');
+          // Se siamo in una partita, rianalizza subito
+          if (state.view === 'analysis' && state.selectedMatch) {
+            analyzeMatch(state.selectedMatch);
+            return;
+          }
+        } catch(e) { console.warn('Cache clear error:', e); }
+      }
       render();
     }
     
@@ -11785,7 +12083,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         <div class="analysis-hero">
           <div class="hero-league">${esc(m.league.country)} • ${esc(m.league.name)} • ${formatDateFull(m.date)} ${formatTime(m.date)}</div>
-          <div class="hero-match">
+          <div class="hero-match" style="position:relative;">
             <div class="hero-team">
               ${m.home.logo ? `<img src="${m.home.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.home.name)}</div>`}
               <div class="hero-team-name">${esc(m.home.name)}</div>
@@ -11798,6 +12096,16 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             <div class="hero-team">
               ${m.away.logo ? `<img src="${m.away.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.away.name)}</div>`}
               <div class="hero-team-name">${esc(m.away.name)}</div>
+            </div>
+            <!-- Stake Indicator (pallino colorato) -->
+            <div style="position:absolute;top:-4px;right:-4px;">
+              ${(() => {
+                try {
+                  const trapS = typeof calculateTrapScore === 'function' ? calculateTrapScore(m, d).score : null;
+                  const aiAdv = generateAIAdvice(m, d);
+                  return renderStakeIndicator(state.consensus, state.regressionScore, trapS, aiAdv?.confidence);
+                } catch(e) { return ''; }
+              })()}
             </div>
           </div>
           
@@ -12051,12 +12359,27 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         </div>
       </div>
 
-      <!-- === STAKE ADVISOR === -->
-      ${(() => {
-        const trapScore = state.analysis ? (typeof calculateTrapScore === 'function' ? calculateTrapScore(state.selectedMatch, state.analysis).score : null) : null;
-        const ai = state.analysis ? generateAIAdvice(state.selectedMatch, state.analysis) : null;
-        return safeRender(() => renderStakeAdvisor(state.consensus, state.regressionScore, trapScore, ai?.confidence), '', 'StakeAdvisor');
-      })()}
+      <!-- === CONTEXT PRESSURE DETECTOR === -->
+      <div class="section-accordion">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)">
+          <div class="section-accordion-title"><span>🎯</span> Context Pressure</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${(() => {
+              try {
+                const cp = d.contextPressure;
+                if (!cp) return '<span style="font-size:0.6rem;color:var(--text-dark);">N/D</span>';
+                const enabled = state.settings.useContextPressure;
+                const badge = enabled && cp.enabled ? '✅ ATTIVO' : !enabled ? '🔒 OFF' : '⚪ N/A';
+                return '<span style="font-size:0.6rem;background:' + cp.color + '18;color:' + cp.color + ';padding:2px 8px;border-radius:8px;font-weight:700;">' + cp.icon + ' ' + badge + '</span>';
+              } catch(e) { return ''; }
+            })()}
+            <span class="section-accordion-arrow">▼</span>
+          </div>
+        </div>
+        <div class="section-accordion-body">
+          ${safeRender(() => renderContextPressure(m, d), '', 'ContextPressure')}
+        </div>
+      </div>
 
       <!-- === v7: ODDS LAB === -->
       <div class="section-accordion">
