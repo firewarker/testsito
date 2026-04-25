@@ -4311,21 +4311,36 @@ async function analyzeMatch(match) {
         awayXG *= adj.awayMultiplier;
       }
       
-      // Form adjustment (ultime 5 partite)
+      // Form adjustment — RECENCY WEIGHTED
+      // Le partite più recenti pesano di più (decay: 1.0, 0.8, 0.6, 0.4, 0.2)
       if (homeForm && awayForm) {
-        const homeWins = (homeForm.match(/W/g) || []).length;
-        const homeLosses = (homeForm.match(/L/g) || []).length;
-        const awayWins = (awayForm.match(/W/g) || []).length;
-        const awayLosses = (awayForm.match(/L/g) || []).length;
+        const decayWeights = [1.0, 0.8, 0.6, 0.4, 0.2]; // più recente → peso maggiore
         
-        // Aggiusta xG in base al form recente
-        if (homeWins >= 4) homeXG *= 1.08; // Ottima forma casa
-        else if (homeWins >= 3) homeXG *= 1.04;
-        else if (homeLosses >= 3) homeXG *= 0.92; // Pessima forma casa
+        function calcFormScore(form) {
+          let score = 0, totalW = 0;
+          const chars = form.split('');
+          for (let i = 0; i < Math.min(chars.length, 5); i++) {
+            const w = decayWeights[i] || 0.2;
+            if (chars[i] === 'W') score += 1.0 * w;
+            else if (chars[i] === 'D') score += 0.4 * w;
+            else score += 0.0 * w; // L = 0
+            totalW += w;
+          }
+          return totalW > 0 ? score / totalW : 0.5; // 0-1 scale, 0.5 = neutro
+        }
         
-        if (awayWins >= 4) awayXG *= 1.08; // Ottima forma ospite
-        else if (awayWins >= 3) awayXG *= 1.04;
-        else if (awayLosses >= 3) awayXG *= 0.92; // Pessima forma ospite
+        const homeFormScore = calcFormScore(homeForm);
+        const awayFormScore = calcFormScore(awayForm);
+        
+        // Converti in moltiplicatore xG: 0.88 (pessima forma) → 1.12 (ottima forma)
+        // Lineare: formScore 0→0.88, 0.5→1.00, 1.0→1.12
+        const homeFormMult = 0.88 + homeFormScore * 0.24;
+        const awayFormMult = 0.88 + awayFormScore * 0.24;
+        
+        homeXG *= homeFormMult;
+        awayXG *= awayFormMult;
+        
+        console.log('📈 Forma xG decay → Casa:', homeFormScore.toFixed(2), '(x' + homeFormMult.toFixed(3) + ') | Ospite:', awayFormScore.toFixed(2), '(x' + awayFormMult.toFixed(3) + ')');
       }
       
       // NOTA: Classifica e Infortuni sono mostrati come INFO ma NON modificano i calcoli
@@ -7098,10 +7113,10 @@ async function analyzeMatch(match) {
       const agreeSources = sources.filter(s => s.pick === winner.pick).length;
       const agreement = totalSources > 0 ? (agreeSources / totalSources * 100) : 0;
       
-      // Confidence calibrata
+      // Confidence calibrata — MASSIMA richiede 3+ fonti concordanti
       let confidence = 'medium', confidenceColor = '#fbbf24';
-      if (agreement >= 80 && winner.maxProb >= 60) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
-      else if (agreement >= 60 && winner.maxProb >= 55) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
+      if (agreement >= 80 && winner.maxProb >= 60 && totalSources >= 3) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
+      else if (agreement >= 60 && winner.maxProb >= 55 && totalSources >= 2) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
       else if (agreement >= 40) { confidence = 'MEDIA'; confidenceColor = '#fbbf24'; }
       else { confidence = 'BASSA'; confidenceColor = '#f87171'; }
       
@@ -8447,6 +8462,9 @@ async function analyzeMatch(match) {
         timestamp: new Date().toISOString(),
         status: 'pending', // pending, won, lost
         result: null,
+        // League info per accuracy tracker
+        leagueId: (() => { const m = state.matches.find(x => x.id === matchId); return m?.league?.id || null; })(),
+        leagueName: (() => { const m = state.matches.find(x => x.id === matchId); return m ? (m.league?.country + ' - ' + m.league?.name) : 'Sconosciuto'; })(),
         // NUOVO: Salva features per ML training
         features: extractMLFeatures(matchId)
       };
@@ -8855,6 +8873,55 @@ async function analyzeMatch(match) {
       });
       
       return stats;
+    }
+    
+    // ═══ LEAGUE ACCURACY TRACKER ═══
+    // Calcola hit rate per campionato dai risultati tracciati
+    function getLeagueAccuracyStats() {
+      var leagues = {};
+      state.trackedBets.forEach(function(b) {
+        if (b.status !== 'won' && b.status !== 'lost') return;
+        var name = b.leagueName || 'Sconosciuto';
+        if (!leagues[name]) leagues[name] = { won: 0, lost: 0, total: 0 };
+        leagues[name].total++;
+        if (b.status === 'won') leagues[name].won++;
+        else leagues[name].lost++;
+      });
+      
+      // Converti in array ordinato per accuratezza decrescente
+      return Object.entries(leagues)
+        .map(function(e) {
+          var n = e[0], d = e[1];
+          return { name: n, won: d.won, lost: d.lost, total: d.total, accuracy: ((d.won / d.total) * 100).toFixed(1) };
+        })
+        .filter(function(l) { return l.total >= 2; }) // almeno 2 bet per mostrare
+        .sort(function(a, b) { return parseFloat(b.accuracy) - parseFloat(a.accuracy); });
+    }
+    
+    function renderLeagueAccuracy() {
+      var leagues = getLeagueAccuracyStats();
+      if (leagues.length === 0) return '<div style="font-size:0.65rem;color:var(--text-dark);text-align:center;padding:10px;">Nessun dato sufficiente. Gioca almeno 2 pick per campionato per vedere le statistiche.</div>';
+      
+      var html = '<div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;">';
+      leagues.forEach(function(l) {
+        var accNum = parseFloat(l.accuracy);
+        var color = accNum >= 65 ? '#10b981' : accNum >= 50 ? '#fbbf24' : '#ef4444';
+        var label = accNum >= 65 ? '🟢' : accNum >= 50 ? '🟡' : '🔴';
+        var barW = Math.max(5, Math.min(100, accNum));
+        
+        html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(255,255,255,0.02);border-radius:6px;">';
+        html += '<span style="font-size:0.7rem;flex-shrink:0;">' + label + '</span>';
+        html += '<div style="flex:1;min-width:0;">';
+        html += '<div style="font-size:0.62rem;color:var(--text-gray);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + l.name + '</div>';
+        html += '<div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:2px;"><div style="height:100%;width:' + barW + '%;background:' + color + ';border-radius:2px;"></div></div>';
+        html += '</div>';
+        html += '<div style="text-align:right;flex-shrink:0;">';
+        html += '<div style="font-size:0.72rem;font-weight:800;color:' + color + ';">' + l.accuracy + '%</div>';
+        html += '<div style="font-size:0.5rem;color:var(--text-dark);">' + l.won + '✅ ' + l.lost + '❌ (' + l.total + ')</div>';
+        html += '</div></div>';
+      });
+      html += '</div>';
+      return html;
     }
     
     function clearOldTrackedBets() {
@@ -9687,6 +9754,11 @@ async function analyzeMatch(match) {
               🟡 Media = €${(state.stakeConfig.capital * state.stakeConfig.levels[2] / 100).toFixed(2)} · 
               🟢 Facile = €${(state.stakeConfig.capital * state.stakeConfig.levels[3] / 100).toFixed(2)}
             </div>
+          </div>
+          
+          <div class="settings-section">
+            <div class="settings-section-title">🏆 Accuratezza per Campionato</div>
+            ${renderLeagueAccuracy()}
           </div>
           
           <div class="settings-section">
