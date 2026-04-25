@@ -7445,318 +7445,282 @@ async function analyzeMatch(match) {
 
     // === NG INSIGHT — Indicatore intelligente No Goal ===
     // Legge SOLO dati esistenti — ZERO impatto sull'algoritmo
-    function renderNGInsight(match, d) {
+    // ═══ REVERSE QUOTE PROTOCOL — GG/NG + Over/Under ═══
+    // Confronta le probabilità del modello con quelle implicite dei bookmaker
+    // Sostituisce NG Insight + GG Insight con un'analisi più affidabile
+    function renderReverseQuoteProtocol(match, d) {
       const pBTTS = d.pBTTS || 50;
       const ngProb = 100 - pBTTS;
-      const hD = d.homeData || {};
-      const aD = d.awayData || {};
+      const pOU = d.pOU || {};
       const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
-      const hCS = hD.cleanSheetPct || 25;
-      const aCS = aD.cleanSheetPct || 25;
-      const hFTS = hD.failedToScorePct || 25;
-      const aFTS = aD.failedToScorePct || 25;
-      
-      // Calcola segnali NG
-      const signals = [];
-      let ngScore = 0;
-      
-      // 1. Probabilità diretta NG
-      if (ngProb >= 55) { ngScore += 20; signals.push({ text: 'NG al ' + ngProb.toFixed(0) + '% (Poisson+DC)', icon: '📊', positive: true }); }
-      else if (ngProb >= 48) { ngScore += 10; signals.push({ text: 'NG al ' + ngProb.toFixed(0) + '% — zona neutrale', icon: '📊', positive: false }); }
-      else { ngScore -= 10; signals.push({ text: 'GG favorito al ' + pBTTS.toFixed(0) + '% — NG sfavorevole', icon: '📊', positive: false }); }
-      
-      // 2. Clean sheet alta di almeno una squadra
-      if (hCS >= 40 || aCS >= 40) {
-        const bestCS = Math.max(hCS, aCS);
-        const team = hCS >= aCS ? match.home.name : match.away.name;
-        ngScore += 18;
-        signals.push({ text: team + ': clean sheet ' + bestCS.toFixed(0) + '% — difesa dominante', icon: '🧱', positive: true });
-      } else if (hCS >= 30 || aCS >= 30) {
-        const bestCS = Math.max(hCS, aCS);
-        const team = hCS >= aCS ? match.home.name : match.away.name;
-        ngScore += 8;
-        signals.push({ text: team + ': clean sheet ' + bestCS.toFixed(0) + '% — difesa solida', icon: '🧱', positive: true });
+      const oddsLab = state.oddsLab;
+
+      // Raccogli quote medie dai bookmaker
+      let avgGG = 0, avgNG = 0, ggCount = 0;
+      let avgOver = 0, avgUnder = 0, ouCount = 0;
+      let sharpGG = null, sharpNG = null, sharpOver = null, sharpUnder = null;
+
+      if (oddsLab && oddsLab.bookmakers) {
+        oddsLab.bookmakers.forEach(function(bk) {
+          if (bk.btts) {
+            avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++;
+            if (bk.isSharp && !sharpGG) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; }
+          }
+          if (bk.ou25) {
+            avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++;
+            if (bk.isSharp && !sharpOver) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; }
+          }
+        });
       }
-      
-      // 3. Failed to score di almeno una squadra
-      if (hFTS >= 35 || aFTS >= 35) {
-        const worstFTS = Math.max(hFTS, aFTS);
-        const team = hFTS >= aFTS ? match.home.name : match.away.name;
-        ngScore += 18;
-        signals.push({ text: team + ': non segna nel ' + worstFTS.toFixed(0) + '% — attacco sterile', icon: '🚫', positive: true });
-      } else if (hFTS >= 25 || aFTS >= 25) {
-        const worstFTS = Math.max(hFTS, aFTS);
-        const team = hFTS >= aFTS ? match.home.name : match.away.name;
-        ngScore += 5;
-        signals.push({ text: team + ': non segna nel ' + worstFTS.toFixed(0) + '%', icon: '🚫', positive: false });
+
+      if (ggCount > 0) { avgGG /= ggCount; avgNG /= ggCount; }
+      if (ouCount > 0) { avgOver /= ouCount; avgUnder /= ouCount; }
+
+      // Calcola probabilità implicite (senza margine)
+      function impliedProbs(odd1, odd2) {
+        if (!odd1 || !odd2 || odd1 <= 1 || odd2 <= 1) return null;
+        var tot = 1/odd1 + 1/odd2;
+        return { p1: (1/odd1/tot)*100, p2: (1/odd2/tot)*100, margin: ((tot-1)*100).toFixed(1) };
       }
-      
-      // 4. xG basso di una squadra
-      const lowXG = Math.min(xG.home, xG.away);
-      const lowXGTeam = xG.home < xG.away ? match.home.name : match.away.name;
-      if (lowXG < 0.8) {
-        ngScore += 16;
-        signals.push({ text: lowXGTeam + ': xG solo ' + lowXG.toFixed(2) + ' — improbabile che segni', icon: '📉', positive: true });
-      } else if (lowXG < 1.0) {
-        ngScore += 8;
-        signals.push({ text: lowXGTeam + ': xG ' + lowXG.toFixed(2) + ' — attacco limitato', icon: '📉', positive: true });
-      }
-      
-      // 5. xG totale basso
-      if (xG.total < 2.0) {
-        ngScore += 12;
-        signals.push({ text: 'xG totale ' + xG.total.toFixed(2) + ' — partita da pochi gol', icon: '🔒', positive: true });
-      }
-      
-      // 6. Entrambe le difese sono deboli = penalità NG
-      if (hCS < 20 && aCS < 20) {
-        ngScore -= 15;
-        signals.push({ text: 'Entrambe con clean sheet sotto 20% — difese fragili', icon: '⚠️', positive: false });
-      }
-      
-      // 7. Entrambe segnano spesso = penalità NG
-      if (hD.goalsFor >= 1.8 && aD.goalsFor >= 1.8) {
-        ngScore -= 12;
-        signals.push({ text: 'Entrambe segnano 1.8+ gol/g — attacchi prolifici', icon: '⚠️', positive: false });
-      }
-      
-      // Normalizza 0-100
-      ngScore = Math.max(0, Math.min(100, ngScore));
-      
-      var level, label, color;
-      if (ngScore >= 60) { level = 'strong'; label = 'NG FORTE'; color = '#10b981'; }
-      else if (ngScore >= 40) { level = 'moderate'; label = 'NG POSSIBILE'; color = '#fbbf24'; }
-      else if (ngScore >= 20) { level = 'weak'; label = 'NG DEBOLE'; color = '#f97316'; }
-      else { level = 'avoid'; label = 'EVITA NG'; color = '#ef4444'; }
-      
-      // === RENDERING ===
-      var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
-      
-      // Hero bar
-      var radius = 36;
-      var circumference = 2 * Math.PI * radius;
-      var dashoffset = circumference - (ngScore / 100) * circumference;
-      
-      html += '<div style="display:flex;align-items:center;gap:16px;padding:14px;background:rgba(' + (level === 'strong' ? '16,185,129' : level === 'moderate' ? '251,191,36' : level === 'weak' ? '249,115,22' : '239,68,68') + ',0.06);border:1.5px solid ' + color + '30;border-radius:14px;">';
-      
-      // Cerchio
-      html += '<div style="flex-shrink:0;position:relative;width:80px;height:80px;">';
-      html += '<svg width="80" height="80" viewBox="0 0 80 80" style="transform:rotate(-90deg);">';
-      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="5"/>';
-      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + circumference.toFixed(1) + '" stroke-dashoffset="' + dashoffset.toFixed(1) + '"/>';
-      html += '</svg>';
-      html += '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">';
-      html += '<div style="font-size:1.3rem;font-weight:900;color:' + color + ';">' + ngScore + '</div>';
-      html += '<div style="font-size:0.45rem;color:var(--text-dark);font-weight:600;">NG SCORE</div>';
-      html += '</div></div>';
-      
-      // Info
-      html += '<div style="flex:1;">';
-      html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-bottom:3px;">Indicatore No Goal</div>';
-      html += '<div style="font-size:1.05rem;font-weight:900;color:' + color + ';margin-bottom:2px;">' + label + '</div>';
-      html += '<div style="font-size:0.78rem;font-weight:700;color:white;">NG: ' + ngProb.toFixed(0) + '% <span style="font-size:0.65rem;color:var(--text-dark)">| GG: ' + pBTTS.toFixed(0) + '%</span></div>';
-      
-      if (level === 'strong') {
-        html += '<div style="font-size:0.62rem;color:#10b981;margin-top:3px;">✅ Condizioni ottimali per NG — giocabile in singola e multipla</div>';
-      } else if (level === 'moderate') {
-        html += '<div style="font-size:0.62rem;color:#fbbf24;margin-top:3px;">⚡ NG possibile — valuta come singola, rischio in multipla</div>';
-      } else if (level === 'weak') {
-        html += '<div style="font-size:0.62rem;color:#f97316;margin-top:3px;">⚠️ NG debole — sconsigliato, meglio GG o mercati gol</div>';
-      } else {
-        html += '<div style="font-size:0.62rem;color:#ef4444;margin-top:3px;">🚫 GG molto più probabile — evita NG</div>';
-      }
-      html += '</div></div>';
-      
-      // Segnali
-      html += '<div style="display:flex;flex-direction:column;gap:5px;">';
-      signals.forEach(function(s) {
-        var bg = s.positive ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.04)';
-        var border = s.positive ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.08)';
-        var textCol = s.positive ? 'var(--text-gray)' : 'var(--text-dark)';
-        html += '<div style="padding:7px 10px;background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;font-size:0.65rem;color:' + textCol + ';">' + s.icon + ' ' + s.text + '</div>';
-      });
-      html += '</div>';
-      
-      // Consiglio combo NG
-      if (level === 'strong' || level === 'moderate') {
-        var pOU = d.pOU || {};
-        html += '<div style="padding:10px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:10px;">';
-        html += '<div style="font-size:0.65rem;font-weight:700;color:#10b981;margin-bottom:6px;">💡 Combo NG consigliate:</div>';
-        var combos = [];
-        if (pOU[2.5] && pOU[2.5].under >= 45) {
-          combos.push('NG + Under 2.5 → ' + ((ngProb * pOU[2.5].under) / 100).toFixed(0) + '% @' + (10000 / (ngProb * pOU[2.5].under)).toFixed(2));
-        }
-        if (pOU[3.5] && pOU[3.5].under >= 55) {
-          combos.push('NG + Under 3.5 → ' + ((ngProb * pOU[3.5].under) / 100).toFixed(0) + '% @' + (10000 / (ngProb * pOU[3.5].under)).toFixed(2));
-        }
-        var p1X2 = d.p1X2 || {};
-        if (p1X2.home >= 55) {
-          combos.push('NG + 1 (Casa) → ' + ((ngProb * p1X2.home) / 100).toFixed(0) + '% @' + (10000 / (ngProb * p1X2.home)).toFixed(2));
-        } else if (p1X2.away >= 55) {
-          combos.push('NG + 2 (Ospite) → ' + ((ngProb * p1X2.away) / 100).toFixed(0) + '% @' + (10000 / (ngProb * p1X2.away)).toFixed(2));
-        }
-        if (combos.length > 0) {
-          html += '<div style="display:flex;flex-direction:column;gap:4px;">';
-          combos.forEach(function(c) {
-            html += '<div style="font-size:0.62rem;color:var(--text-gray);padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:6px;">• ' + c + '</div>';
-          });
-          html += '</div>';
+
+      var ggImpl = impliedProbs(avgGG, avgNG);
+      var ouImpl = impliedProbs(avgOver, avgUnder);
+      var sharpGGImpl = impliedProbs(sharpGG, sharpNG);
+      var sharpOUImpl = impliedProbs(sharpOver, sharpUnder);
+
+      // === CALCOLA DELTA E VERDETTI ===
+      var markets = [];
+
+      // GG/NG
+      if (ggImpl) {
+        var deltaGG = pBTTS - ggImpl.p1;
+        var deltaNG = ngProb - ggImpl.p2;
+        var bestPick, bestDelta, bestColor, bestIcon, bestProb, bookProb;
+
+        if (deltaGG > 5) {
+          bestPick = 'GG'; bestDelta = deltaGG; bestColor = '#10b981'; bestIcon = '💎';
+          bestProb = pBTTS; bookProb = ggImpl.p1;
+        } else if (deltaNG > 5) {
+          bestPick = 'NG'; bestDelta = deltaNG; bestColor = '#10b981'; bestIcon = '💎';
+          bestProb = ngProb; bookProb = ggImpl.p2;
         } else {
-          html += '<div style="font-size:0.62rem;color:var(--text-dark);">Nessuna combo particolarmente forte per questa partita.</div>';
+          bestPick = pBTTS >= ngProb ? 'GG' : 'NG'; bestDelta = 0; bestColor = '#94a3b8'; bestIcon = '⚖️';
+          bestProb = Math.max(pBTTS, ngProb); bookProb = pBTTS >= ngProb ? ggImpl.p1 : ggImpl.p2;
         }
-        html += '</div>';
-      }
-      
-      html += '</div>';
-      return html;
-    }
 
-    // renderBettingExchange rimossa
+        // DIVERGENZA: modello e bookmaker non concordano → downgrade il colore
+        var modelPick_gg = pBTTS >= ngProb ? 'GG' : 'NG';
+        var bookPick_gg = ggImpl.p1 >= ggImpl.p2 ? 'GG' : 'NG';
+        var hasDivergence_gg = modelPick_gg !== bookPick_gg;
+        
+        if (hasDivergence_gg) {
+          bestColor = '#f59e0b'; // giallo/arancione, MAI verde quando divergono
+          bestIcon = '⚠️';
+        }
 
-    // === GG INSIGHT — Indicatore intelligente Goal/Goal ===
-    // Legge SOLO dati esistenti — ZERO impatto sull'algoritmo
-    function renderGGInsight(match, d) {
-      const pBTTS = d.pBTTS || 50;
-      const hD = d.homeData || {};
-      const aD = d.awayData || {};
-      const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
-      const hCS = hD.cleanSheetPct || 25;
-      const aCS = aD.cleanSheetPct || 25;
-      const hFTS = hD.failedToScorePct || 25;
-      const aFTS = aD.failedToScorePct || 25;
-      
-      var signals = [];
-      var ggScore = 0;
-      
-      // 1. Probabilità diretta GG
-      if (pBTTS >= 58) { ggScore += 22; signals.push({ text: 'GG al ' + pBTTS.toFixed(0) + '% (Poisson+DC) — entrambe segnano spesso', icon: '📊', positive: true }); }
-      else if (pBTTS >= 50) { ggScore += 12; signals.push({ text: 'GG al ' + pBTTS.toFixed(0) + '% — zona equilibrata', icon: '📊', positive: true }); }
-      else { ggScore -= 10; signals.push({ text: 'NG favorito al ' + (100 - pBTTS).toFixed(0) + '% — GG sfavorevole', icon: '📊', positive: false }); }
-      
-      // 2. Entrambe segnano bene (goalsFor)
-      if (hD.goalsFor >= 1.5 && aD.goalsFor >= 1.2) {
-        ggScore += 18;
-        signals.push({ text: 'Entrambe offensive: ' + match.home.name + ' ' + hD.goalsFor.toFixed(1) + ' gol/g, ' + match.away.name + ' ' + aD.goalsFor.toFixed(1) + ' gol/g', icon: '⚽', positive: true });
-      } else if (hD.goalsFor >= 1.3 && aD.goalsFor >= 1.0) {
-        ggScore += 8;
-        signals.push({ text: 'Attacchi discreti: ' + hD.goalsFor.toFixed(1) + ' e ' + aD.goalsFor.toFixed(1) + ' gol/g', icon: '⚽', positive: true });
+        var verdict = '';
+        if (hasDivergence_gg) {
+          if (bestDelta > 15) verdict = 'CAUTELA: il modello vede VALUE su ' + bestPick + ' (Δ+' + bestDelta.toFixed(1) + ') ma il bookmaker la pensa diversamente. Rischio alto.';
+          else verdict = 'DIVERGENZA: Modello e Bookmaker non concordano. Mercato incerto — meglio evitare.';
+        } else {
+          if (bestDelta > 15) verdict = 'VALUE FORTE: modello e bookmaker concordano su ' + bestPick + '. Bookmaker sottostima di ' + bestDelta.toFixed(1) + ' punti.';
+          else if (bestDelta > 5) verdict = 'VALUE: leggero vantaggio su ' + bestPick + ' con concordanza (Δ+' + bestDelta.toFixed(1) + ')';
+          else verdict = 'Quote allineate — modello e bookmaker concordano su ' + bestPick;
+        }
+
+        markets.push({
+          title: 'GG / NG',
+          icon: '⚽',
+          modelPick: pBTTS >= ngProb ? 'GG' : 'NG',
+          modelProb: Math.max(pBTTS, ngProb),
+          bookPick: ggImpl.p1 >= ggImpl.p2 ? 'GG' : 'NG',
+          bookProb: Math.max(ggImpl.p1, ggImpl.p2),
+          rows: [
+            { label: 'GG', quota: avgGG, modelP: pBTTS, bookP: ggImpl.p1, delta: pBTTS - ggImpl.p1, sharpQuota: sharpGG },
+            { label: 'NG', quota: avgNG, modelP: ngProb, bookP: ggImpl.p2, delta: ngProb - ggImpl.p2, sharpQuota: sharpNG }
+          ],
+          margin: ggImpl.margin,
+          bestPick: bestPick,
+          bestDelta: bestDelta,
+          bestColor: bestColor,
+          bestIcon: bestIcon,
+          verdict: verdict
+        });
       }
-      
-      // 3. Clean sheet bassa di ENTRAMBE = difese fragili
-      if (hCS < 25 && aCS < 25) {
-        ggScore += 18;
-        signals.push({ text: 'Difese fragili: CS ' + hCS.toFixed(0) + '% e ' + aCS.toFixed(0) + '% — entrambe subiscono spesso', icon: '🚪', positive: true });
-      } else if (hCS < 30 && aCS < 30) {
-        ggScore += 8;
-        signals.push({ text: 'Difese non impenetrabili: CS ' + hCS.toFixed(0) + '% e ' + aCS.toFixed(0) + '%', icon: '🚪', positive: true });
+
+      // Over/Under 2.5
+      if (ouImpl && pOU[2.5]) {
+        var overP = pOU[2.5].over;
+        var underP = pOU[2.5].under;
+        var deltaOver = overP - ouImpl.p1;
+        var deltaUnder = underP - ouImpl.p2;
+        var bestPick2, bestDelta2, bestColor2, bestIcon2;
+
+        if (deltaOver > 5) {
+          bestPick2 = 'Over 2.5'; bestDelta2 = deltaOver; bestColor2 = '#10b981'; bestIcon2 = '💎';
+        } else if (deltaUnder > 5) {
+          bestPick2 = 'Under 2.5'; bestDelta2 = deltaUnder; bestColor2 = '#10b981'; bestIcon2 = '💎';
+        } else {
+          bestPick2 = overP >= underP ? 'Over 2.5' : 'Under 2.5'; bestDelta2 = 0; bestColor2 = '#94a3b8'; bestIcon2 = '⚖️';
+        }
+
+        // DIVERGENZA Over/Under
+        var modelPick_ou = overP >= underP ? 'Over 2.5' : 'Under 2.5';
+        var bookPick_ou = ouImpl.p1 >= ouImpl.p2 ? 'Over 2.5' : 'Under 2.5';
+        var hasDivergence_ou = modelPick_ou !== bookPick_ou;
+        
+        if (hasDivergence_ou) {
+          bestColor2 = '#f59e0b';
+          bestIcon2 = '⚠️';
+        }
+
+        var verdict2 = '';
+        if (hasDivergence_ou) {
+          if (bestDelta2 > 15) verdict2 = 'CAUTELA: il modello vede VALUE su ' + bestPick2 + ' (Δ+' + bestDelta2.toFixed(1) + ') ma il bookmaker la pensa diversamente. Rischio alto.';
+          else verdict2 = 'DIVERGENZA: Modello e Bookmaker non concordano. Mercato incerto — meglio evitare.';
+        } else {
+          if (bestDelta2 > 15) verdict2 = 'VALUE FORTE: modello e bookmaker concordano su ' + bestPick2 + '. Bookmaker sottostima di ' + bestDelta2.toFixed(1) + ' punti.';
+          else if (bestDelta2 > 5) verdict2 = 'VALUE: leggero vantaggio su ' + bestPick2 + ' con concordanza (Δ+' + bestDelta2.toFixed(1) + ')';
+          else verdict2 = 'Quote allineate — modello e bookmaker concordano su ' + bestPick2;
+        }
+
+        markets.push({
+          title: 'Over / Under 2.5',
+          icon: '📊',
+          modelPick: overP >= underP ? 'Over 2.5' : 'Under 2.5',
+          modelProb: Math.max(overP, underP),
+          bookPick: ouImpl.p1 >= ouImpl.p2 ? 'Over 2.5' : 'Under 2.5',
+          bookProb: Math.max(ouImpl.p1, ouImpl.p2),
+          rows: [
+            { label: 'Over 2.5', quota: avgOver, modelP: overP, bookP: ouImpl.p1, delta: overP - ouImpl.p1, sharpQuota: sharpOver },
+            { label: 'Under 2.5', quota: avgUnder, modelP: underP, bookP: ouImpl.p2, delta: underP - ouImpl.p2, sharpQuota: sharpUnder }
+          ],
+          margin: ouImpl.margin,
+          bestPick: bestPick2,
+          bestDelta: bestDelta2,
+          bestColor: bestColor2,
+          bestIcon: bestIcon2,
+          verdict: verdict2
+        });
       }
-      
-      // 4. Failed to Score basso di ENTRAMBE = segnano quasi sempre
-      if (hFTS < 20 && aFTS < 20) {
-        ggScore += 16;
-        signals.push({ text: 'Entrambe segnano quasi sempre: FTS ' + hFTS.toFixed(0) + '% e ' + aFTS.toFixed(0) + '%', icon: '🎯', positive: true });
-      }
-      
-      // 5. xG alto di entrambe
-      if (xG.home >= 1.3 && xG.away >= 1.0) {
-        ggScore += 12;
-        signals.push({ text: 'xG alti: ' + xG.home.toFixed(2) + ' vs ' + xG.away.toFixed(2) + ' — entrambe pericolose', icon: '📈', positive: true });
-      }
-      
-      // 6. Penalità: una squadra non segna quasi mai
-      if (hFTS >= 40 || aFTS >= 40) {
-        var worstTeam = hFTS >= aFTS ? match.home.name : match.away.name;
-        var worstFTS = Math.max(hFTS, aFTS);
-        ggScore -= 18;
-        signals.push({ text: worstTeam + ': non segna nel ' + worstFTS.toFixed(0) + '% — rischio NG alto', icon: '⚠️', positive: false });
-      }
-      
-      // 7. Penalità: una difesa è un muro
-      if (hCS >= 45 || aCS >= 45) {
-        var wallTeam = hCS >= aCS ? match.home.name : match.away.name;
-        var wallCS = Math.max(hCS, aCS);
-        ggScore -= 15;
-        signals.push({ text: wallTeam + ': clean sheet ' + wallCS.toFixed(0) + '% — muro difensivo', icon: '⚠️', positive: false });
-      }
-      
-      ggScore = Math.max(0, Math.min(100, ggScore));
-      
-      var level, label, color;
-      if (ggScore >= 60) { level = 'strong'; label = 'GG FORTE'; color = '#10b981'; }
-      else if (ggScore >= 40) { level = 'moderate'; label = 'GG POSSIBILE'; color = '#fbbf24'; }
-      else if (ggScore >= 20) { level = 'weak'; label = 'GG DEBOLE'; color = '#f97316'; }
-      else { level = 'avoid'; label = 'EVITA GG'; color = '#ef4444'; }
-      
+
       // === RENDERING ===
-      var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
-      
-      var radius = 36;
-      var circumference = 2 * Math.PI * radius;
-      var dashoffset = circumference - (ggScore / 100) * circumference;
-      
-      html += '<div style="display:flex;align-items:center;gap:16px;padding:14px;background:rgba(' + (level === 'strong' ? '16,185,129' : level === 'moderate' ? '251,191,36' : level === 'weak' ? '249,115,22' : '239,68,68') + ',0.06);border:1.5px solid ' + color + '30;border-radius:14px;">';
-      
-      html += '<div style="flex-shrink:0;position:relative;width:80px;height:80px;">';
-      html += '<svg width="80" height="80" viewBox="0 0 80 80" style="transform:rotate(-90deg);">';
-      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="5"/>';
-      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + circumference.toFixed(1) + '" stroke-dashoffset="' + dashoffset.toFixed(1) + '"/>';
-      html += '</svg>';
-      html += '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">';
-      html += '<div style="font-size:1.3rem;font-weight:900;color:' + color + ';">' + ggScore + '</div>';
-      html += '<div style="font-size:0.45rem;color:var(--text-dark);font-weight:600;">GG SCORE</div>';
-      html += '</div></div>';
-      
-      html += '<div style="flex:1;">';
-      html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-bottom:3px;">Indicatore Goal/Goal</div>';
-      html += '<div style="font-size:1.05rem;font-weight:900;color:' + color + ';margin-bottom:2px;">' + label + '</div>';
-      html += '<div style="font-size:0.78rem;font-weight:700;color:white;">GG: ' + pBTTS.toFixed(0) + '% <span style="font-size:0.65rem;color:var(--text-dark)">| NG: ' + (100 - pBTTS).toFixed(0) + '%</span></div>';
-      
-      if (level === 'strong') {
-        html += '<div style="font-size:0.62rem;color:#10b981;margin-top:3px;">✅ Condizioni ideali per GG — giocabile con fiducia</div>';
-      } else if (level === 'moderate') {
-        html += '<div style="font-size:0.62rem;color:#fbbf24;margin-top:3px;">⚡ GG possibile — valuta il contesto prima di giocare</div>';
-      } else if (level === 'weak') {
-        html += '<div style="font-size:0.62rem;color:#f97316;margin-top:3px;">⚠️ GG rischioso — una delle due potrebbe non segnare</div>';
-      } else {
-        html += '<div style="font-size:0.62rem;color:#ef4444;margin-top:3px;">🚫 NG più probabile — evita GG</div>';
+      if (markets.length === 0) {
+        return '<div style="padding:16px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ In attesa delle quote bookmaker per il Reverse Quote Protocol...</div>';
       }
-      html += '</div></div>';
-      
-      // Segnali
-      html += '<div style="display:flex;flex-direction:column;gap:5px;">';
-      signals.forEach(function(s) {
-        var bg = s.positive ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.04)';
-        var border = s.positive ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.08)';
-        var textCol = s.positive ? 'var(--text-gray)' : 'var(--text-dark)';
-        html += '<div style="padding:7px 10px;background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;font-size:0.65rem;color:' + textCol + ';">' + s.icon + ' ' + s.text + '</div>';
-      });
-      html += '</div>';
-      
-      // Combo GG consigliate
-      if (level === 'strong' || level === 'moderate') {
-        var pOU = d.pOU || {};
-        html += '<div style="padding:10px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:10px;">';
-        html += '<div style="font-size:0.65rem;font-weight:700;color:#10b981;margin-bottom:6px;">💡 Combo GG consigliate:</div>';
-        var combos = [];
-        if (pOU[2.5] && pOU[2.5].over >= 50) {
-          combos.push('GG + Over 2.5 → ' + ((pBTTS * pOU[2.5].over) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[2.5].over)).toFixed(2));
-        }
-        if (pOU[3.5] && pOU[3.5].under >= 50) {
-          combos.push('GG + Under 3.5 → ' + ((pBTTS * pOU[3.5].under) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[3.5].under)).toFixed(2));
-        }
-        if (pOU[1.5] && pOU[1.5].over >= 65) {
-          combos.push('GG + Over 1.5 → ' + ((pBTTS * pOU[1.5].over) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[1.5].over)).toFixed(2));
-        }
-        if (combos.length > 0) {
-          html += '<div style="display:flex;flex-direction:column;gap:4px;">';
-          combos.forEach(function(c) {
-            html += '<div style="font-size:0.62rem;color:var(--text-gray);padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:6px;">• ' + c + '</div>';
-          });
+
+      var html = '<div style="display:flex;flex-direction:column;gap:16px;">';
+
+      markets.forEach(function(mkt) {
+        var bgGrad = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.06)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.05)' : 'rgba(148,163,184,0.04)';
+        var borderCol = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.25)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.2)' : 'rgba(148,163,184,0.15)';
+
+        html += '<div style="background:' + bgGrad + ';border:1.5px solid ' + borderCol + ';border-radius:14px;padding:16px;">';
+
+        // Header
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+        html += '<div style="font-size:0.85rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.icon + ' ' + mkt.title + ' — Reverse Quote</div>';
+        html += '<span style="font-size:0.55rem;color:var(--text-dark);">Margine: ' + mkt.margin + '%</span>';
+        html += '</div>';
+
+        // Quote + Confronto grid
+        html += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">';
+        mkt.rows.forEach(function(r) {
+          var deltaColor = r.delta > 5 ? '#10b981' : r.delta < -5 ? '#ef4444' : '#94a3b8';
+          var isValue = r.delta > 5;
+          var isTrap = r.delta < -10;
+
+          html += '<div style="display:flex;align-items:center;gap:6px;padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border:1px solid ' + (isValue ? 'rgba(16,185,129,0.3)' : isTrap ? 'rgba(239,68,68,0.2)' : 'transparent') + ';">';
+
+          // Label
+          html += '<div style="width:65px;font-size:0.72rem;font-weight:700;color:white;">' + r.label + '</div>';
+
+          // Quota media
+          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Quota</div><div style="font-weight:800;color:#f59e0b;font-size:0.95rem;">' + (r.quota ? r.quota.toFixed(2) : '—') + '</div></div>';
+
+          // Prob Bookmaker
+          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Book</div><div style="font-weight:700;color:#f59e0b;font-size:0.85rem;">' + r.bookP.toFixed(1) + '%</div></div>';
+
+          // Prob Modello
+          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Modello</div><div style="font-weight:700;color:#60a5fa;font-size:0.85rem;">' + r.modelP.toFixed(1) + '%</div></div>';
+
+          // Delta
+          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Delta</div><div style="font-weight:800;color:' + deltaColor + ';font-size:0.85rem;">' + (r.delta > 0 ? '+' : '') + r.delta.toFixed(1) + '%</div></div>';
+
+          // Value badge
+          if (isValue) html += '<div style="font-size:0.5rem;background:rgba(16,185,129,0.15);color:#10b981;padding:2px 6px;border-radius:6px;font-weight:800;">VALUE</div>';
+          else if (isTrap) html += '<div style="font-size:0.5rem;background:rgba(239,68,68,0.12);color:#ef4444;padding:2px 6px;border-radius:6px;font-weight:800;">TRAP</div>';
+
           html += '</div>';
+        });
+        html += '</div>';
+
+        // Sharp vs modello
+        if (mkt.rows[0].sharpQuota) {
+          html += '<div style="font-size:0.6rem;color:var(--text-dark);margin-bottom:8px;">⭐ Sharp: ' + mkt.rows[0].label + ' @' + mkt.rows[0].sharpQuota.toFixed(2) + ' | ' + mkt.rows[1].label + ' @' + mkt.rows[1].sharpQuota.toFixed(2) + '</div>';
+        }
+
+        // Verdetto
+        html += '<div style="padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border-left:3px solid ' + mkt.bestColor + ';">';
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
+        html += '<div style="font-size:0.78rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.bestIcon + ' Verdetto: ' + mkt.bestPick + '</div>';
+        if (mkt.bestDelta > 5) {
+          html += '<span style="font-size:0.6rem;background:' + mkt.bestColor + '20;color:' + mkt.bestColor + ';padding:3px 10px;border-radius:20px;font-weight:700;">Δ+' + mkt.bestDelta.toFixed(1) + '%</span>';
         }
         html += '</div>';
-      }
-      
+        html += '<div style="font-size:0.65rem;color:var(--text-gray);margin-top:4px;">' + mkt.verdict + '</div>';
+
+        // Confronto modello vs book + AZIONE CONSIGLIATA
+        if (mkt.modelPick !== mkt.bookPick) {
+          // Determina chi è più affidabile
+          var bookIsClose = Math.abs(mkt.bookProb - 50) < 5; // book quasi 50/50
+          var modelIsStrong = mkt.modelProb >= 65;
+          
+          html += '<div style="margin-top:8px;padding:10px;background:rgba(245,158,11,0.08);border:1.5px solid rgba(245,158,11,0.3);border-radius:10px;">';
+          html += '<div style="font-size:0.72rem;font-weight:800;color:#f59e0b;margin-bottom:6px;">⚠️ DIVERGENZA — Modello vs Bookmaker</div>';
+          html += '<div style="display:flex;gap:8px;margin-bottom:8px;">';
+          html += '<div style="flex:1;padding:8px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello dice</div><div style="font-size:0.85rem;font-weight:800;color:#60a5fa;">' + mkt.modelPick + '</div><div style="font-size:0.65rem;color:#60a5fa;">' + mkt.modelProb.toFixed(0) + '%</div></div>';
+          html += '<div style="display:flex;align-items:center;font-size:1.2rem;color:#f59e0b;">≠</div>';
+          html += '<div style="flex:1;padding:8px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Bookmaker dice</div><div style="font-size:0.85rem;font-weight:800;color:#f59e0b;">' + mkt.bookPick + '</div><div style="font-size:0.65rem;color:#f59e0b;">' + mkt.bookProb.toFixed(0) + '%</div></div>';
+          html += '</div>';
+          
+          // AZIONE CONSIGLIATA
+          html += '<div style="padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;border-left:3px solid #f59e0b;">';
+          html += '<div style="font-size:0.65rem;font-weight:800;color:#fbbf24;margin-bottom:4px;">📋 AZIONE CONSIGLIATA:</div>';
+          if (bookIsClose) {
+            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Il bookmaker è quasi 50/50 (' + mkt.bookProb.toFixed(0) + '%) → mercato incerto. <b style="color:#ef4444;">SKIP</b> — non giocare questo mercato. Nessuno dei due è affidabile.</div>';
+          } else if (modelIsStrong && mkt.bestDelta > 15) {
+            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Il modello è convinto (' + mkt.modelProb.toFixed(0) + '%) con delta alto. <b style="color:#f59e0b;">SINGOLA CAUTELA</b> — se giochi, solo singola con stake minimo (Difficile). Il bookmaker potrebbe avere info che il modello non ha.</div>';
+          } else {
+            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Modello e bookmaker discordano. <b style="color:#ef4444;">SKIP</b> — evita questo mercato e cerca partite dove concordano.</div>';
+          }
+          html += '</div></div>';
+        } else {
+          // CONCORDANZA
+          var concordLevel = mkt.bestDelta > 15 ? 'FORTE' : mkt.bestDelta > 5 ? 'BUONA' : 'BASE';
+          var concordAction = mkt.bestDelta > 15 ? 'GIOCA con fiducia — singola o multipla' : mkt.bestDelta > 5 ? 'GIOCABILE in singola' : 'Segnale neutro — nessun vantaggio';
+          var concordColor = mkt.bestDelta > 15 ? '#10b981' : mkt.bestDelta > 5 ? '#00d4ff' : '#94a3b8';
+          
+          html += '<div style="margin-top:8px;padding:10px;background:rgba(16,185,129,0.06);border:1.5px solid rgba(16,185,129,0.2);border-radius:10px;">';
+          html += '<div style="font-size:0.72rem;font-weight:800;color:#10b981;margin-bottom:6px;">✅ CONCORDANZA ' + concordLevel + ' — Modello e Bookmaker d\'accordo</div>';
+          html += '<div style="display:flex;gap:8px;margin-bottom:8px;">';
+          html += '<div style="flex:1;padding:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Entrambi dicono</div><div style="font-size:1rem;font-weight:900;color:#10b981;">' + mkt.modelPick + '</div></div>';
+          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello</div><div style="font-weight:700;color:#60a5fa;">' + mkt.modelProb.toFixed(0) + '%</div></div>';
+          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Bookmaker</div><div style="font-weight:700;color:#f59e0b;">' + mkt.bookProb.toFixed(0) + '%</div></div>';
+          html += '</div>';
+          html += '<div style="padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;border-left:3px solid ' + concordColor + ';">';
+          html += '<div style="font-size:0.65rem;font-weight:800;color:' + concordColor + ';margin-bottom:2px;">📋 AZIONE: ' + concordAction + '</div>';
+          if (mkt.bestDelta > 5) html += '<div style="font-size:0.6rem;color:var(--text-dark);">Il bookmaker sottostima ' + mkt.bestPick + ' di ' + mkt.bestDelta.toFixed(1) + ' punti → edge reale.</div>';
+          html += '</div></div>';
+        }
+
+        html += '</div>';
+        html += '</div>';
+      });
+
+      // xG info di supporto
+      html += '<div style="font-size:0.58rem;color:var(--text-dark);text-align:center;padding:6px;">ℹ️ xG Totale: ' + xG.total.toFixed(2) + ' (' + match.home.name + ' ' + xG.home.toFixed(2) + ' vs ' + match.away.name + ' ' + xG.away.toFixed(2) + ') — Usato per calibrare le probabilità del modello</div>';
+
       html += '</div>';
       return html;
     }
@@ -12060,43 +12024,26 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         </div>
       </div>
 
-      <!-- NG INSIGHT (originale) -->
+      <!-- REVERSE QUOTE PROTOCOL — GG/NG + Over/Under -->
       <div class="section-accordion">
         <div class="section-accordion-header" onclick="toggleAccordion(this)">
-          <div class="section-accordion-title"><span>🚫</span> NG Insight</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            ${(() => {
-              try {
-                const ngP = (100 - (d.pBTTS || 50)).toFixed(0);
-                const ngColor = ngP >= 55 ? '#10b981' : ngP >= 48 ? '#fbbf24' : '#ef4444';
-                return '<span style="font-size:0.6rem;background:' + ngColor + '18;color:' + ngColor + ';padding:2px 8px;border-radius:8px;font-weight:700;">NG ' + ngP + '%</span>';
-              } catch(e) { return ''; }
-            })()}
-            <span class="section-accordion-arrow">▼</span>
-          </div>
-        </div>
-        <div class="section-accordion-body">
-          ${safeRender(() => renderNGInsight(m, d), '', 'NGInsight')}
-        </div>
-      </div>
-      
-      <!-- GG INSIGHT -->
-      <div class="section-accordion">
-        <div class="section-accordion-header" onclick="toggleAccordion(this)">
-          <div class="section-accordion-title"><span>⚽</span> GG Insight</div>
+          <div class="section-accordion-title"><span>🔄</span> Reverse Quote Protocol</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
               try {
                 const ggP = (d.pBTTS || 50).toFixed(0);
-                const ggColor = ggP >= 58 ? '#10b981' : ggP >= 50 ? '#fbbf24' : '#ef4444';
-                return '<span style="font-size:0.6rem;background:' + ggColor + '18;color:' + ggColor + ';padding:2px 8px;border-radius:8px;font-weight:700;">GG ' + ggP + '%</span>';
+                const ngP = (100 - (d.pBTTS || 50)).toFixed(0);
+                const pick = d.pBTTS >= 50 ? 'GG' : 'NG';
+                const prob = Math.max(d.pBTTS || 50, 100 - (d.pBTTS || 50)).toFixed(0);
+                const col = prob >= 58 ? '#10b981' : prob >= 50 ? '#fbbf24' : '#ef4444';
+                return '<span style="font-size:0.6rem;background:' + col + '18;color:' + col + ';padding:2px 8px;border-radius:8px;font-weight:700;">' + pick + ' ' + prob + '%</span>';
               } catch(e) { return ''; }
             })()}
             <span class="section-accordion-arrow">▼</span>
           </div>
         </div>
         <div class="section-accordion-body">
-          ${safeRender(() => renderGGInsight(m, d), '', 'GGInsight')}
+          ${safeRender(() => renderReverseQuoteProtocol(m, d), '', 'ReverseQuoteProtocol')}
         </div>
       </div>
       
