@@ -3648,7 +3648,14 @@
       
       try {
         console.log(`&#x1F50D; Requesting fixtures for date: ${dateStr}, timezone: Europe/Rome`);
-        const data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
+        let data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
+        
+        // Retry: se API non risponde, aspetta 4 sec e riprova
+        if (!data || !data.response) {
+          console.log('🔄 API fixtures vuota, retry tra 4 sec...');
+          await new Promise(r => setTimeout(r, 4000));
+          data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
+        }
         
         console.log('&#x1F4E6; API Response:', data);
         
@@ -4139,17 +4146,27 @@ async function analyzeMatch(match) {
           try { state.superAnalysis = runSuperAlgorithm(match, cached); render(); }
           catch(e) { Logger.log('SuperAlgo-cache', e); }
         }
-        // v7: Calcola moduli avanzati anche da cache
+        // v7: Calcola moduli avanzati anche da cache (con retry)
         (async () => {
           try {
-            const oddsLab = await fetchOddsLab(match.id);
-            state.oddsLab = oddsLab;
-            if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
+            let oddsLab = await fetchOddsLab(match.id);
+            if (!oddsLab) {
+              await new Promise(r => setTimeout(r, 3000));
+              oddsLab = await fetchOddsLab(match.id);
+            }
+            state.oddsLab = oddsLab || false;
+            if (oddsLab) {
+              state.valueBets = calculateValueBets(cached, oddsLab);
+            } else {
+              state.valueBets = false;
+            }
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
             state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
             render();
           } catch(e) {
+            if (!state.oddsLab) state.oddsLab = false;
+            if (!state.valueBets) state.valueBets = false;
             state.regressionScore = calculateRegressionScore(match, cached, null);
             const aiC = generateAIAdvice(match, cached);
             state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis);
@@ -4292,16 +4309,26 @@ async function analyzeMatch(match) {
         state.loading = false;
         render();
         
-        // Poi calcola Odds Lab in background
+        // Poi calcola Odds Lab in background (con retry)
         try {
           console.log('🔬 v7: Fetching Odds Lab...');
-          const oddsLab = await fetchOddsLab(match.id);
-          state.oddsLab = oddsLab;
+          let oddsLab = await fetchOddsLab(match.id);
+          
+          // Retry: se null, aspetta 3 sec e riprova
+          if (!oddsLab) {
+            console.log('🔄 Odds Lab vuoto, retry tra 3 sec...');
+            await new Promise(r => setTimeout(r, 3000));
+            oddsLab = await fetchOddsLab(match.id);
+          }
+          
+          state.oddsLab = oddsLab || false; // false = tentato ma non disponibile
           
           // Value Bets (richiede oddsLab)
           if (oddsLab) {
             state.valueBets = calculateValueBets(state.analysis, oddsLab);
             console.log('✅ v7: Value Bets calcolate,', state.valueBets?.totalValueBets || 0, 'value trovate');
+          } else {
+            state.valueBets = false;
           }
           
           // Regression Score
@@ -4320,6 +4347,8 @@ async function analyzeMatch(match) {
           render();
         } catch(e) {
           console.warn('⚠️ v7 modules partial error:', e);
+          if (!state.oddsLab) state.oddsLab = false;
+          if (!state.valueBets) state.valueBets = false;
           // Calcola comunque Regression e Consensus senza oddsLab
           state.regressionScore = calculateRegressionScore(match, state.analysis, null);
           const aiForConsensus = generateAIAdvice(match, state.analysis);
@@ -12387,7 +12416,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>💰</span> Odds Lab — Multi-Bookmaker</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (!state.oddsLab) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              if (state.oddsLab === null) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              if (state.oddsLab === false) return '<span style="font-size:0.6rem;color:#f87171;">N/D</span>';
               const steamCount = state.oddsLab.steamMoves.filter(s => s.type === 'bullish').length;
               return '<span style="font-size:0.6rem;background:rgba(245,158,11,0.12);color:#f59e0b;padding:2px 8px;border-radius:8px;font-weight:700;">' + state.oddsLab.bookmakers.length + ' book' + (steamCount > 0 ? ' • 🔥' + steamCount + ' steam' : '') + '</span>';
             })()}
@@ -12395,7 +12425,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.oddsLab ? safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'}
+          ${state.oddsLab && state.oddsLab !== false ? safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab') : state.oddsLab === false ? '<div style="padding:14px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Quote non disponibili per questa partita. Riprova tra qualche minuto.</div>' : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'}
         </div>
       </div>
       
@@ -12405,7 +12435,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>🎯</span> Value Bet Engine + Kelly</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (!state.valueBets) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              if (state.valueBets === null) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              if (state.valueBets === false) return '<span style="font-size:0.6rem;color:#f87171;">N/D</span>';
               const count = state.valueBets.totalValueBets;
               return count > 0 
                 ? '<span style="font-size:0.6rem;background:rgba(0,229,160,0.15);color:#00e5a0;padding:2px 8px;border-radius:8px;font-weight:800;">🎯 ' + count + ' VALUE</span>'
@@ -12415,7 +12446,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.valueBets ? safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'}
+          ${state.valueBets && state.valueBets !== false ? safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets') : state.valueBets === false ? '<div style="padding:14px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Value Bets non calcolabili — quote non disponibili.</div>' : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'}
         </div>
       </div>
 
