@@ -7,10 +7,12 @@
     // ============================================
     const CONFIG = {
       API_FOOTBALL: {
-        baseURL: 'https://bettingpro-ai.lucalagan.workers.dev/api-football'
+        key: 'aeb2864a3d4dbb8395fa53c83a876a93',
+        baseURL: 'https://v3.football.api-sports.io'
       },
       FOOTYSTATS: {
-        baseURL: 'https://bettingpro-ai.lucalagan.workers.dev/footystats'
+        key: 'bec59b6f83404b0bd79c40076be71f6f3abec62afdacf5eeba296f2357993f3e',
+        baseURL: 'https://api.footystats.org'
       },
       FIREBASE: {
         url: 'https://bettingpro2-9f1d9-default-rtdb.europe-west1.firebasedatabase.app',
@@ -641,6 +643,9 @@
       liveMode: false,
       liveMatches: [],
       liveAlerts: [],
+      liveAnalyzed: new Map(),
+      liveMatchIntervals: new Map(),
+      liveEditingMatch: null,
       liveMatchPicks: {},
       liveLoading: false,
       liveInterval: null,
@@ -690,8 +695,7 @@
         showInjuries: true,
         showStandings: true,
         autoRefresh: true,
-        useMLThresholds: true, // NUOVO: usa soglie ML invece di manuali
-        useContextPressure: false // NUOVO: Context Pressure per fine stagione (default OFF)
+        useMLThresholds: true // NUOVO: usa soglie ML invece di manuali
       })),
       settingsOpen: false,
 
@@ -769,8 +773,8 @@
         source: source // 'quick' = auto-record, 'full' = analisi completa
       });
       
-      if (history.length > 15) {
-        state.predictionHistory[key].predictions = history.slice(-15);
+      if (history.length > 20) {
+        state.predictionHistory[key].predictions = history.slice(-20);
       }
       
       savePredictionHistory();
@@ -779,44 +783,69 @@
     
     function savePredictionHistory() {
       try {
-        // 1. Mantieni solo ultime 48h (2 giorni)
-        const twoDaysAgo = new Date();
-        twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-        const cutoffDate = twoDaysAgo.toISOString().split('T')[0];
-        const today = getDateString(0);
+        // === RETENTION BASATA SU ULTIMA ATTIVITÀ (NON SU DATA PARTITA) ===
+        // Una partita rimane in storico fintanto che è attiva (ultima registrazione < 7 giorni).
+        // Così entrare in una partita NON la cancella, e le partite vecchie ma toccate di recente
+        // restano disponibili.
+        const RETENTION_HOURS = 168; // 7 giorni dalla ultima registrazione
+        const MAX_PREDICTIONS_PER_MATCH = 20; // unificato (era 8/15/5)
+        const MAX_MATCHES_TOTAL = 600; // raddoppiato (era 300)
+        const now = Date.now();
+        const retentionMs = RETENTION_HOURS * 60 * 60 * 1000;
 
+        // 1. Cleanup: rimuovi partite la cui ULTIMA registrazione è > RETENTION_HOURS
+        let removedAge = 0;
         Object.keys(state.predictionHistory).forEach(key => {
           const entry = state.predictionHistory[key];
-          if (entry && entry.date && entry.date < cutoffDate) {
+          if (!entry || !entry.predictions || entry.predictions.length === 0) {
             delete state.predictionHistory[key];
+            removedAge++;
+            return;
+          }
+          // Ultima attività della partita
+          const lastActivity = entry.predictions.reduce((max, p) => Math.max(max, p.fullTime || 0), 0);
+          // Se non c'è fullTime (vecchie entry), usa la data partita come fallback
+          if (lastActivity === 0) {
+            // Mantieni 7 giorni dalla data partita
+            const matchDateMs = entry.date ? new Date(entry.date).getTime() : 0;
+            if (matchDateMs && (now - matchDateMs) > retentionMs) {
+              delete state.predictionHistory[key];
+              removedAge++;
+            }
+          } else if ((now - lastActivity) > retentionMs) {
+            delete state.predictionHistory[key];
+            removedAge++;
           }
         });
 
-        // 2. Limita a max 8 predizioni per partita
+        // 2. Limita predizioni per partita (limite generoso, unificato)
         Object.keys(state.predictionHistory).forEach(key => {
           const preds = state.predictionHistory[key]?.predictions;
-          if (preds && preds.length > 8) {
-            state.predictionHistory[key].predictions = preds.slice(-8);
+          if (preds && preds.length > MAX_PREDICTIONS_PER_MATCH) {
+            state.predictionHistory[key].predictions = preds.slice(-MAX_PREDICTIONS_PER_MATCH);
           }
         });
 
-        // 3. Limita a max 300 partite — rimuovi le PIÙ VECCHIE per data (non per key order!)
+        // 3. Limite totale partite — rimuove SOLO se superato, ordinando per ULTIMA ATTIVITÀ
         const allEntries = Object.keys(state.predictionHistory).map(key => ({
           key,
-          date: state.predictionHistory[key]?.date || '2000-01-01',
-          lastUpdate: (state.predictionHistory[key]?.predictions || []).reduce((max, p) => Math.max(max, p.fullTime || 0), 0)
+          lastUpdate: (state.predictionHistory[key]?.predictions || []).reduce((max, p) => Math.max(max, p.fullTime || 0), 0),
+          date: state.predictionHistory[key]?.date || '2000-01-01'
         }));
-        
-        if (allEntries.length > 300) {
-          // Ordina: più vecchie prima (per data, poi per ultimo aggiornamento)
+
+        if (allEntries.length > MAX_MATCHES_TOTAL) {
+          // Ordina per ultima attività (le meno toccate prima)
           allEntries.sort((a, b) => {
-            if (a.date !== b.date) return a.date.localeCompare(b.date);
-            return a.lastUpdate - b.lastUpdate;
+            if (a.lastUpdate !== b.lastUpdate) return a.lastUpdate - b.lastUpdate;
+            return a.date.localeCompare(b.date);
           });
-          // Rimuovi le più vecchie, tieni le 300 più recenti
-          const toRemove = allEntries.slice(0, allEntries.length - 300);
+          const toRemove = allEntries.slice(0, allEntries.length - MAX_MATCHES_TOTAL);
           toRemove.forEach(e => delete state.predictionHistory[e.key]);
-          console.log('🗑️ Storico: rimossi', toRemove.length, 'entries vecchie, restano', Object.keys(state.predictionHistory).length);
+          console.log('🗑️ Storico: limite ' + MAX_MATCHES_TOTAL + ' raggiunto, rimosse ' + toRemove.length + ' partite meno attive');
+        }
+
+        if (removedAge > 0) {
+          console.log('🧹 Storico: rimosse ' + removedAge + ' partite scadute (>7 giorni inattività)');
         }
 
         // 4. Salva su Firebase in background
@@ -826,20 +855,21 @@
           );
         }
 
-        // 5. Salva su localStorage
+        // 5. Salva su localStorage (con fallback in caso di quota)
         try {
           localStorage.setItem('bp2_prediction_history', JSON.stringify(state.predictionHistory));
         } catch(quotaErr) {
-          console.warn('localStorage quota: taglio storico...');
-          // Tieni solo oggi e ieri
-          const yesterday = getDateString(-1);
+          console.warn('localStorage quota piena: riduco storico a 48h...');
+          // Tieni solo le partite attive nelle ultime 48h
+          const cutoff48h = now - (48 * 60 * 60 * 1000);
           Object.keys(state.predictionHistory).forEach(key => {
-            const d = state.predictionHistory[key]?.date;
-            if (d && d !== today && d !== yesterday) delete state.predictionHistory[key];
+            const entry = state.predictionHistory[key];
+            const lastAct = (entry?.predictions || []).reduce((max, p) => Math.max(max, p.fullTime || 0), 0);
+            if (lastAct < cutoff48h) delete state.predictionHistory[key];
           });
           try {
             localStorage.setItem('bp2_prediction_history', JSON.stringify(state.predictionHistory));
-            console.log('✅ Storico ridotto e salvato');
+            console.log('✅ Storico ridotto a 48h e salvato');
           } catch(e2) {
             state.predictionHistory = {};
             localStorage.removeItem('bp2_prediction_history');
@@ -1322,9 +1352,9 @@
             source: 'quick' // Auto-record = dati rapidi
           });
           
-          // Max 15 registrazioni per partita
-          if (history.length > 15) {
-            state.predictionHistory[key].predictions = history.slice(-15);
+          // Max 20 registrazioni per partita (unificato con save singolo)
+          if (history.length > 20) {
+            state.predictionHistory[key].predictions = history.slice(-20);
           }
           
           recorded++;
@@ -1338,75 +1368,12 @@
       }
     }
     
-    // Salvataggio batch — limiti più generosi per il daily
+    // Salvataggio batch — usa gli STESSI limiti generosi del save singolo
+    // (prima questa funzione tagliava a 5 predizioni per partita, distruggendo le tue registrazioni!)
     function savePredictionHistoryBatch() {
-      try {
-        // 1. Pulizia: rimuovi partite vecchie (più di 3 giorni)
-        const threeDaysAgo = new Date();
-        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const cutoffDate = threeDaysAgo.toISOString().split('T')[0];
-        
-        Object.keys(state.predictionHistory).forEach(key => {
-          const entry = state.predictionHistory[key];
-          if (entry && entry.date && entry.date < cutoffDate) {
-            delete state.predictionHistory[key];
-          }
-        });
-        
-        // 2. Max 5 predizioni per partita
-        Object.keys(state.predictionHistory).forEach(key => {
-          const preds = state.predictionHistory[key]?.predictions;
-          if (preds && preds.length > 5) {
-            state.predictionHistory[key].predictions = preds.slice(-5);
-          }
-        });
-        
-        // 3. Firebase: max 400 partite — ordina per DATA (non per key!)
-        const allEntries = Object.keys(state.predictionHistory).map(key => ({
-          key,
-          date: state.predictionHistory[key]?.date || '2000-01-01'
-        }));
-        if (allEntries.length > 400) {
-          allEntries.sort((a, b) => a.date.localeCompare(b.date));
-          allEntries.slice(0, allEntries.length - 400).forEach(e => delete state.predictionHistory[e.key]);
-        }
-        
-        // 4. Salva su Firebase
-        if (typeof saveToFirebase === 'function') {
-          saveToFirebase('predictionHistory', state.predictionHistory).catch(e =>
-            console.debug('predictionHistory Firebase sync:', e.message)
-          );
-        }
-        
-        // 5. localStorage: max 250 partite — ordina per DATA
-        try {
-          const localCopy = { ...state.predictionHistory };
-          const localEntries = Object.keys(localCopy).map(key => ({
-            key,
-            date: localCopy[key]?.date || '2000-01-01'
-          }));
-          if (localEntries.length > 250) {
-            localEntries.sort((a, b) => a.date.localeCompare(b.date));
-            localEntries.slice(0, localEntries.length - 250).forEach(e => delete localCopy[e.key]);
-          }
-          localStorage.setItem('bp2_prediction_history', JSON.stringify(localCopy));
-        } catch(quotaErr) {
-          console.warn('localStorage quota: taglio storico...');
-          // Tieni solo oggi e ieri
-          const today = getDateString(0);
-          const yesterday = getDateString(-1);
-          const reduced = {};
-          Object.keys(state.predictionHistory).forEach(k => {
-            const d = state.predictionHistory[k]?.date;
-            if (d === today || d === yesterday) reduced[k] = state.predictionHistory[k];
-          });
-          try {
-            localStorage.setItem('bp2_prediction_history', JSON.stringify(reduced));
-          } catch(e2) {
-            localStorage.removeItem('bp2_prediction_history');
-          }
-        }
-      } catch(e) { console.warn('Errore savePredictionHistoryBatch:', e); }
+      // Delega al save singolo che ha la logica corretta basata su timestamp
+      // (limiti unificati: 20 pred/partita, 600 partite, 7 giorni inattività)
+      savePredictionHistory();
     }
     
     // Timer per auto-aggiornamento storico ogni 2 ore
@@ -2492,102 +2459,28 @@
       return { difficulty, pct, stake, label, capital: cfg.capital };
     }
     
-    // ═══ CONTEXT PRESSURE RENDER ═══
-    function renderContextPressure(match, d) {
+    // === STAKE ADVISOR BADGE COMPATTO ===
+    // Versione mini del Stake Advisor: solo un badge nella riga top, no sezione completa
+    function renderStakeAdvisorBadge(consensus, regression, trapScore, confidence) {
+      const cfg = state.stakeConfig;
+      if (!cfg || cfg.capital <= 0) return '';
       try {
-        var cp = d.contextPressure;
-        if (!cp) return '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">Dati classifica non disponibili per questa partita.</div>';
-        
-        var enabled = state.settings.useContextPressure;
-        
-        var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
-        
-        // Header
-        var headerBg = 'rgba(' + (cp.enabled ? (cp.icon === '🔥' ? '239,68,68' : cp.icon === '⚠️' ? '245,158,11' : cp.icon === '⚽' || cp.icon === '🎯' ? '0,212,255' : '148,163,184') : '148,163,184') + ',0.08)';
-        html += '<div style="padding:14px;background:' + headerBg + ';border:1.5px solid ' + cp.color + '30;border-radius:12px;">';
-        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
-        html += '<div style="display:flex;align-items:center;gap:10px;">';
-        html += '<span style="font-size:1.4rem;">' + cp.icon + '</span>';
-        html += '<div><div style="font-size:0.85rem;font-weight:800;color:' + cp.color + ';">' + cp.context + '</div>';
-        html += '<div style="font-size:0.6rem;color:var(--text-dark);">Context Pressure Detector</div></div></div>';
-        
-        if (!enabled) {
-          html += '<span style="font-size:0.55rem;background:rgba(148,163,184,0.15);color:#94a3b8;padding:4px 10px;border-radius:10px;font-weight:700;">🔒 DISATTIVATO</span>';
-        } else if (cp.enabled) {
-          html += '<span style="font-size:0.55rem;background:' + cp.color + '20;color:' + cp.color + ';padding:4px 10px;border-radius:10px;font-weight:700;">✅ ATTIVO</span>';
-        }
-        html += '</div>';
-        
-        // Posizioni squadre
-        if (d.homePosition && d.awayPosition) {
-          html += '<div style="display:flex;gap:8px;margin-top:10px;">';
-          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;">';
-          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + esc(match.home.name) + '</div>';
-          html += '<div style="font-size:1rem;font-weight:900;color:white;">#' + d.homePosition.position + '</div>';
-          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + d.homePosition.points + ' pt · ' + d.homePosition.motivationText + '</div>';
-          html += '</div>';
-          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;">';
-          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + esc(match.away.name) + '</div>';
-          html += '<div style="font-size:1rem;font-weight:900;color:white;">#' + d.awayPosition.position + '</div>';
-          html += '<div style="font-size:0.55rem;color:var(--text-dark);">' + d.awayPosition.points + ' pt · ' + d.awayPosition.motivationText + '</div>';
-          html += '</div></div>';
-        }
-        html += '</div>';
-        
-        // Segnali
-        if (cp.signals && cp.signals.length > 0) {
-          html += '<div style="display:flex;flex-direction:column;gap:5px;">';
-          cp.signals.forEach(function(s) {
-            html += '<div style="padding:8px 10px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;font-size:0.68rem;color:var(--text-gray);">▸ ' + s + '</div>';
-          });
-          html += '</div>';
-        }
-        
-        // Moltiplicatori xG (solo se attivo)
-        if (enabled && cp.enabled) {
-          html += '<div style="padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border-left:3px solid ' + cp.color + ';">';
-          html += '<div style="font-size:0.65rem;font-weight:800;color:' + cp.color + ';margin-bottom:6px;">📊 IMPATTO SUL MODELLO:</div>';
-          html += '<div style="display:flex;gap:12px;font-size:0.62rem;color:var(--text-gray);">';
-          if (cp.homeBoost !== 1.0) html += '<span>xG ' + esc(match.home.name) + ': <b style="color:' + (cp.homeBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.homeBoost.toFixed(2) + '</b></span>';
-          if (cp.awayBoost !== 1.0) html += '<span>xG ' + esc(match.away.name) + ': <b style="color:' + (cp.awayBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.awayBoost.toFixed(2) + '</b></span>';
-          if (cp.totalBoost !== 1.0) html += '<span>xG totale: <b style="color:' + (cp.totalBoost > 1 ? '#10b981' : '#ef4444') + ';">×' + cp.totalBoost.toFixed(2) + '</b></span>';
-          html += '</div></div>';
-        }
-        
-        // Info se disattivato
-        if (!enabled) {
-          html += '<div style="padding:10px;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.15);border-radius:10px;font-size:0.62rem;color:var(--text-gray);">';
-          html += '💡 <b>Context Pressure è attualmente disattivato.</b> I dati sono mostrati a scopo informativo ma non modificano i pronostici. Per attivarlo, vai su Impostazioni ⚙️.';
-          html += '</div>';
-        }
-        
-        html += '</div>';
-        return html;
-      } catch (e) {
-        console.warn('renderContextPressure error:', e.message);
-        return '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;">Errore nel caricamento del Context Pressure.</div>';
+        const diff = calculateMatchDifficulty(consensus, regression, trapScore, confidence, false);
+        const adv = getStakeAdvice(diff);
+        const diffColors = { 1: '#ef4444', 2: '#f59e0b', 3: '#10b981' };
+        const diffIcons = { 1: '🔴', 2: '🟡', 3: '🟢' };
+        const c = diffColors[diff];
+        // Badge: icona + label + stake suggerito
+        return '<span title="Stake Advisor — ' + adv.label + ': ' + adv.pct + '% del capitale (€' + adv.stake.toFixed(0) + ')" ' +
+          'style="font-size:0.6rem;background:' + c + '15;color:' + c + ';padding:2px 7px;border-radius:4px;font-weight:800;border:1px solid ' + c + '30;">' +
+          '💰 ' + diffIcons[diff] + ' €' + adv.stake.toFixed(0) + ' (' + adv.pct + '%)' +
+          '</span>';
+      } catch(e) {
+        console.warn('renderStakeAdvisorBadge error:', e);
+        return '';
       }
     }
-    
-    // ═══ STAKE INDICATOR — pallino colorato compatto ═══
-    function renderStakeIndicator(consensus, regression, trapScore, confidence) {
-      try {
-        var cfg = state.stakeConfig;
-        if (!cfg || cfg.capital <= 0) return '';
-        var diff = calculateMatchDifficulty(consensus, regression, trapScore, confidence, false);
-        var adv = getStakeAdvice(diff);
-        var colors = { 1: '#ef4444', 2: '#f59e0b', 3: '#10b981' };
-        var icons = { 1: '🔴', 2: '🟡', 3: '🟢' };
-        var c = colors[diff];
-        var stake = (cfg.capital * adv.pct / 100).toFixed(0);
-        
-        return '<div title="Stake Advisor: ' + adv.label + ' — €' + stake + ' (' + adv.pct + '%)" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:' + c + '15;border:1.5px solid ' + c + '40;border-radius:20px;cursor:help;">' +
-          '<span style="font-size:0.85rem;">' + icons[diff] + '</span>' +
-          '<div style="font-size:0.6rem;font-weight:800;color:' + c + ';line-height:1;">€' + stake + '</div>' +
-        '</div>';
-      } catch (e) { return ''; }
-    }
-    
+
     function renderStakeAdvisor(consensus, regression, trapScore, confidence) {
       const cfg = state.stakeConfig;
       if (!cfg || cfg.capital <= 0) return '';
@@ -3161,6 +3054,10 @@
         const timeoutId = setTimeout(() => controller.abort(), 8000);
         
         const res = await fetch(testUrl, {
+          headers: {
+            'x-rapidapi-key': CONFIG.API_FOOTBALL.key,
+            'x-rapidapi-host': 'v3.football.api-sports.io'
+          },
           signal: controller.signal
         });
         clearTimeout(timeoutId);
@@ -3188,8 +3085,12 @@
       const url = new URL(CONFIG.API_FOOTBALL.baseURL + endpoint);
       Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
       try {
-        const res = await fetchWithRetry(url.toString(), {},
-          { retries: 3, baseDelay: 600, timeout: 15000, label: 'API-Football' });
+        const res = await fetchWithRetry(url.toString(), {
+          headers: {
+            'x-rapidapi-key': CONFIG.API_FOOTBALL.key,
+            'x-rapidapi-host': 'v3.football.api-sports.io'
+          }
+        }, { retries: 3, baseDelay: 600, timeout: 15000, label: 'API-Football' });
         const data = await res.json();
         if (state.api.football !== 'online') {
           state.api.football = 'online';
@@ -3607,25 +3508,43 @@
       render();
     }
 
-    // === FOOTYSTATS API — via Worker proxy (chiave protetta server-side) ===
+    // === FOOTYSTATS API — PRO plan: chiamata diretta supportata ===
     async function callFootyStats(endpoint, params = {}) {
       const url = new URL(CONFIG.FOOTYSTATS.baseURL + endpoint);
+      url.searchParams.append('key', CONFIG.FOOTYSTATS.key);
       Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
 
-      try {
-        const res = await fetchWithRetry(url.toString(), {}, {
-          retries: 3, baseDelay: 500, timeout: 12000, label: 'FootyStats-Worker'
-        });
-        const data = await res.json();
-        if (state.api.footystats !== 'online') {
-          state.api.footystats = 'online';
-          localStorage.setItem('api_footystats_status', 'online');
-          render();
+      // Con API PRO FootyStats il CORS è abilitato → chiamata diretta prima
+      // Cloudflare Worker come fallback sicuro, poi corsproxy.io come ultimo
+      // Worker URL: bettingpro-ai.lucalagan.workers.dev deve rispondere con Access-Control-Allow-Origin: *
+      // Se il Worker fallisce per CORS, usiamo proxy pubblici come fallback
+      const attempts = [
+        { url: url.toString(),                                                                                 label: 'FootyStats-Direct'  },
+        { url: 'https://bettingpro-ai.lucalagan.workers.dev/footystats?target=' + encodeURIComponent(url.toString()), label: 'FootyStats-Worker'  },
+        { url: 'https://corsproxy.io/?' + encodeURIComponent(url.toString()),                                  label: 'FootyStats-CORSio'  },
+        { url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url.toString()),                     label: 'FootyStats-AllOrigins' },
+      ];
+
+      for (const attempt of attempts) {
+        try {
+          const res = await fetchWithRetry(attempt.url, {}, {
+            retries: 2, baseDelay: 500, timeout: 12000, label: attempt.label
+          });
+          const data = await res.json();
+          if (state.api.footystats !== 'online') {
+            state.api.footystats = 'online';
+            localStorage.setItem('api_footystats_status', 'online');
+            render();
+          }
+          console.log('\u2705 FootyStats OK via', attempt.label);
+          return data;
+        } catch(e) {
+          if (attempt.label === 'FootyStats-CORSio' || attempt.label === 'FootyStats-AllOrigins') {
+            console.warn('FootyStats', attempt.label, 'fallito:', e.message);
+          } else {
+            console.debug('FootyStats', attempt.label, 'fallito (CORS atteso):', e.message);
+          }
         }
-        console.log('\u2705 FootyStats OK via Worker');
-        return data;
-      } catch(e) {
-        console.warn('FootyStats Worker fallito:', e.message);
       }
 
       Logger.log('callFootyStats', new Error('Tutti i tentativi falliti per ' + endpoint));
@@ -3648,14 +3567,7 @@
       
       try {
         console.log(`&#x1F50D; Requesting fixtures for date: ${dateStr}, timezone: Europe/Rome`);
-        let data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
-        
-        // Retry: se API non risponde, aspetta 4 sec e riprova
-        if (!data || !data.response) {
-          console.log('🔄 API fixtures vuota, retry tra 4 sec...');
-          await new Promise(r => setTimeout(r, 4000));
-          data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
-        }
+        const data = await callAPIFootball('/fixtures', { date: dateStr, timezone: 'Europe/Rome' });
         
         console.log('&#x1F4E6; API Response:', data);
         
@@ -4146,27 +4058,17 @@ async function analyzeMatch(match) {
           try { state.superAnalysis = runSuperAlgorithm(match, cached); render(); }
           catch(e) { Logger.log('SuperAlgo-cache', e); }
         }
-        // v7: Calcola moduli avanzati anche da cache (con retry)
+        // v7: Calcola moduli avanzati anche da cache
         (async () => {
           try {
-            let oddsLab = await fetchOddsLab(match.id);
-            if (!oddsLab) {
-              await new Promise(r => setTimeout(r, 3000));
-              oddsLab = await fetchOddsLab(match.id);
-            }
-            state.oddsLab = oddsLab || false;
-            if (oddsLab) {
-              state.valueBets = calculateValueBets(cached, oddsLab);
-            } else {
-              state.valueBets = false;
-            }
+            const oddsLab = await fetchOddsLab(match.id);
+            state.oddsLab = oddsLab;
+            if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
             state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
             render();
           } catch(e) {
-            if (!state.oddsLab) state.oddsLab = false;
-            if (!state.valueBets) state.valueBets = false;
             state.regressionScore = calculateRegressionScore(match, cached, null);
             const aiC = generateAIAdvice(match, cached);
             state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis);
@@ -4309,26 +4211,16 @@ async function analyzeMatch(match) {
         state.loading = false;
         render();
         
-        // Poi calcola Odds Lab in background (con retry)
+        // Poi calcola Odds Lab in background
         try {
           console.log('🔬 v7: Fetching Odds Lab...');
-          let oddsLab = await fetchOddsLab(match.id);
-          
-          // Retry: se null, aspetta 3 sec e riprova
-          if (!oddsLab) {
-            console.log('🔄 Odds Lab vuoto, retry tra 3 sec...');
-            await new Promise(r => setTimeout(r, 3000));
-            oddsLab = await fetchOddsLab(match.id);
-          }
-          
-          state.oddsLab = oddsLab || false; // false = tentato ma non disponibile
+          const oddsLab = await fetchOddsLab(match.id);
+          state.oddsLab = oddsLab;
           
           // Value Bets (richiede oddsLab)
           if (oddsLab) {
             state.valueBets = calculateValueBets(state.analysis, oddsLab);
             console.log('✅ v7: Value Bets calcolate,', state.valueBets?.totalValueBets || 0, 'value trovate');
-          } else {
-            state.valueBets = false;
           }
           
           // Regression Score
@@ -4347,8 +4239,6 @@ async function analyzeMatch(match) {
           render();
         } catch(e) {
           console.warn('⚠️ v7 modules partial error:', e);
-          if (!state.oddsLab) state.oddsLab = false;
-          if (!state.valueBets) state.valueBets = false;
           // Calcola comunque Regression e Consensus senza oddsLab
           state.regressionScore = calculateRegressionScore(match, state.analysis, null);
           const aiForConsensus = generateAIAdvice(match, state.analysis);
@@ -4387,159 +4277,6 @@ async function analyzeMatch(match) {
     }
 
     // === ALGORITMO AVANZATO ===
-    // ═══ CONTEXT PRESSURE DETECTOR ═══
-    // Analizza posizione in classifica e pressione fine stagione
-    // RESTITUISCE SEMPRE UN OGGETTO VALIDO — zero crash anche senza dati
-    function calculateContextPressure(match, homePosition, awayPosition) {
-      var result = {
-        enabled: false,        // true solo se ci sono dati sufficienti
-        homeBoost: 1.0,        // moltiplicatore xG casa (default = neutro)
-        awayBoost: 1.0,        // moltiplicatore xG ospite (default = neutro)
-        totalBoost: 1.0,       // moltiplicatore xG totale (default = neutro)
-        drawBoost: 0,          // punti aggiuntivi al pareggio (default = 0)
-        context: 'Normale',    // descrizione contesto
-        icon: '⚪',
-        color: '#94a3b8',
-        signals: []            // segnali testuali per il pannello
-      };
-
-      try {
-        if (!homePosition || !awayPosition) {
-          result.context = 'Dati classifica non disponibili';
-          result.icon = '⚫';
-          return result;
-        }
-
-        var played = (homePosition.played || 0) + (awayPosition.played || 0);
-        var totalTeams = homePosition.totalTeams || 20;
-        var homeRank = homePosition.position || 10;
-        var awayRank = awayPosition.position || 10;
-
-        // Stima giornate totali: totalTeams × 2 - 2 (andata+ritorno)
-        var totalMatchdays = (totalTeams * 2) - 2;
-        var avgPlayed = played / 2;
-        var matchdaysLeft = totalMatchdays - avgPlayed;
-
-        // Solo ultimi 10 turni: Context Pressure attivo
-        if (matchdaysLeft > 10) {
-          result.context = 'Inizio/mezzo stagione — pressione bassa';
-          result.icon = '🟢';
-          result.color = '#10b981';
-          result.signals.push('Stagione non ancora decisiva — xG non modificati');
-          return result;
-        }
-
-        result.enabled = true;
-
-        // === ZONE CALDE ===
-        var relegationZone = totalTeams - 2;
-        var playoutZone = totalTeams - 5;
-
-        var homeInRelegation = homeRank >= relegationZone;
-        var awayInRelegation = awayRank >= relegationZone;
-        var homeNearRelegation = homeRank >= playoutZone && homeRank < relegationZone;
-        var awayNearRelegation = awayRank >= playoutZone && awayRank < relegationZone;
-
-        var homeInChampions = homeRank <= 4;
-        var awayInChampions = awayRank <= 4;
-        var homeChasingEuropa = homeRank >= 5 && homeRank <= 8;
-        var awayChasingEuropa = awayRank >= 5 && awayRank <= 8;
-
-        var homeMidTable = homeRank > 8 && homeRank < playoutZone;
-        var awayMidTable = awayRank > 8 && awayRank < playoutZone;
-
-        // === SCENARI ===
-
-        // Scontro diretto salvezza
-        if ((homeInRelegation || homeNearRelegation) && (awayInRelegation || awayNearRelegation)) {
-          result.totalBoost = 0.85;
-          result.drawBoost = 8;
-          result.context = '🔥 Scontro Salvezza Diretto';
-          result.icon = '🔥';
-          result.color = '#ef4444';
-          result.signals.push('Entrambe lottano per non retrocedere — partita tesa, molti falli, pochi gol');
-          result.signals.push('xG totale ridotto del 15%, boost pareggio +8 punti');
-          return result;
-        }
-
-        // Una in lotta salvezza contro rilassata
-        if ((homeInRelegation || homeNearRelegation) && !awayInRelegation && !awayNearRelegation) {
-          result.homeBoost = 1.05; // casa gioca con più determinazione
-          result.awayBoost = 0.92;
-          result.context = '⚠️ ' + match.home.name + ' in lotta salvezza';
-          result.icon = '⚠️';
-          result.color = '#f59e0b';
-          result.signals.push(match.home.name + ' lotta per la sopravvivenza — motivazione massima');
-          result.signals.push(match.away.name + ' senza obiettivi — rischio approccio rilassato');
-          return result;
-        }
-        if ((awayInRelegation || awayNearRelegation) && !homeInRelegation && !homeNearRelegation && !homeInChampions) {
-          result.awayBoost = 1.05;
-          result.homeBoost = 0.92;
-          result.context = '⚠️ ' + match.away.name + ' in lotta salvezza';
-          result.icon = '⚠️';
-          result.color = '#f59e0b';
-          result.signals.push(match.away.name + ' lotta per la sopravvivenza — motivazione massima');
-          result.signals.push(match.home.name + ' senza obiettivi — rischio approccio rilassato');
-          return result;
-        }
-
-        // Scontro diretto Champions/Europa
-        if ((homeInChampions || homeChasingEuropa) && (awayInChampions || awayChasingEuropa)) {
-          result.totalBoost = 1.10;
-          result.context = '⚽ Scontro per l\'Europa';
-          result.icon = '⚽';
-          result.color = '#00d4ff';
-          result.signals.push('Entrambe in corsa per Champions/Europa — partita aperta');
-          result.signals.push('xG totale aumentato del 10% — attacchi a tutta');
-          return result;
-        }
-
-        // Una in corsa Champions contro salva
-        if (homeInChampions && awayMidTable) {
-          result.homeBoost = 1.12;
-          result.context = '🎯 ' + match.home.name + ' punta Champions';
-          result.icon = '🎯';
-          result.color = '#00d4ff';
-          result.signals.push(match.home.name + ' deve vincere per la zona Champions');
-          result.signals.push(match.away.name + ' tranquilla a metà classifica');
-          return result;
-        }
-        if (awayInChampions && homeMidTable) {
-          result.awayBoost = 1.12;
-          result.context = '🎯 ' + match.away.name + ' punta Champions';
-          result.icon = '🎯';
-          result.color = '#00d4ff';
-          result.signals.push(match.away.name + ' deve vincere per la zona Champions');
-          result.signals.push(match.home.name + ' tranquilla a metà classifica');
-          return result;
-        }
-
-        // Entrambe tranquille a metà
-        if (homeMidTable && awayMidTable) {
-          result.totalBoost = 0.95;
-          result.context = '😐 Metà Classifica Tranquilla';
-          result.icon = '😐';
-          result.color = '#94a3b8';
-          result.signals.push('Entrambe senza obiettivi particolari');
-          result.signals.push('xG totale leggermente ridotto — partita di routine');
-          return result;
-        }
-
-        // Default: pressione neutra
-        result.context = 'Contesto Neutro';
-        result.icon = '⚪';
-        return result;
-
-      } catch (e) {
-        console.warn('Context Pressure error:', e.message);
-        // In caso di errore, ritorna valori neutri (zero impatto)
-        result.enabled = false;
-        result.context = 'Errore calcolo contesto';
-        return result;
-      }
-    }
-
     function buildAnalysis(match, homeStats, awayStats, h2h, apiPred, fsMatch, homeForm, awayForm, extraData = {}) {
       const homeData = extractTeamData(homeStats, 'home');
       const awayData = extractTeamData(awayStats, 'away');
@@ -4590,61 +4327,25 @@ async function analyzeMatch(match) {
         awayXG *= adj.awayMultiplier;
       }
       
-      // Form adjustment — RECENCY WEIGHTED
-      // Le partite più recenti pesano di più (decay: 1.0, 0.8, 0.6, 0.4, 0.2)
+      // Form adjustment (ultime 5 partite)
       if (homeForm && awayForm) {
-        const decayWeights = [1.0, 0.8, 0.6, 0.4, 0.2]; // più recente → peso maggiore
+        const homeWins = (homeForm.match(/W/g) || []).length;
+        const homeLosses = (homeForm.match(/L/g) || []).length;
+        const awayWins = (awayForm.match(/W/g) || []).length;
+        const awayLosses = (awayForm.match(/L/g) || []).length;
         
-        function calcFormScore(form) {
-          let score = 0, totalW = 0;
-          const chars = form.split('');
-          for (let i = 0; i < Math.min(chars.length, 5); i++) {
-            const w = decayWeights[i] || 0.2;
-            if (chars[i] === 'W') score += 1.0 * w;
-            else if (chars[i] === 'D') score += 0.4 * w;
-            else score += 0.0 * w; // L = 0
-            totalW += w;
-          }
-          return totalW > 0 ? score / totalW : 0.5; // 0-1 scale, 0.5 = neutro
-        }
+        // Aggiusta xG in base al form recente
+        if (homeWins >= 4) homeXG *= 1.08; // Ottima forma casa
+        else if (homeWins >= 3) homeXG *= 1.04;
+        else if (homeLosses >= 3) homeXG *= 0.92; // Pessima forma casa
         
-        const homeFormScore = calcFormScore(homeForm);
-        const awayFormScore = calcFormScore(awayForm);
-        
-        // Converti in moltiplicatore xG: 0.88 (pessima forma) → 1.12 (ottima forma)
-        // Lineare: formScore 0→0.88, 0.5→1.00, 1.0→1.12
-        const homeFormMult = 0.88 + homeFormScore * 0.24;
-        const awayFormMult = 0.88 + awayFormScore * 0.24;
-        
-        homeXG *= homeFormMult;
-        awayXG *= awayFormMult;
-        
-        console.log('📈 Forma xG decay → Casa:', homeFormScore.toFixed(2), '(x' + homeFormMult.toFixed(3) + ') | Ospite:', awayFormScore.toFixed(2), '(x' + awayFormMult.toFixed(3) + ')');
+        if (awayWins >= 4) awayXG *= 1.08; // Ottima forma ospite
+        else if (awayWins >= 3) awayXG *= 1.04;
+        else if (awayLosses >= 3) awayXG *= 0.92; // Pessima forma ospite
       }
       
       // NOTA: Classifica e Infortuni sono mostrati come INFO ma NON modificano i calcoli
       // per mantenere coerenza con i pronostici storici
-      
-      // ═══ CONTEXT PRESSURE (opt-in via Settings) ═══
-      // Attivo SOLO se settings.useContextPressure === true
-      // Se disattivato: xG NON modificati (comportamento identico al precedente)
-      var contextPressure = null;
-      try {
-        contextPressure = calculateContextPressure(match, homePosition, awayPosition);
-        if (state.settings.useContextPressure && contextPressure && contextPressure.enabled) {
-          homeXG *= contextPressure.homeBoost;
-          awayXG *= contextPressure.awayBoost;
-          var globalMult = contextPressure.totalBoost;
-          if (globalMult !== 1.0) {
-            homeXG *= globalMult;
-            awayXG *= globalMult;
-          }
-          console.log('🎯 Context Pressure applicato:', contextPressure.context, '| casa x' + contextPressure.homeBoost.toFixed(2), 'ospite x' + contextPressure.awayBoost.toFixed(2), 'totale x' + globalMult.toFixed(2));
-        }
-      } catch (e) {
-        console.warn('Context Pressure error, xG non modificati:', e.message);
-        contextPressure = null;
-      }
       
       // Home advantage (realistico: studi mostrano ~+6% casa, ~-5% trasferta)
       homeXG *= 1.06;  // +6% vantaggio casa (conservativo e realistico)
@@ -4666,7 +4367,7 @@ async function analyzeMatch(match) {
 
       // === BAYESIAN BLENDING CON QUOTE BOOKMAKER ===
       // I bookmaker investono milioni in modelli predittivi: le loro prob sono molto accurate
-      // Blending: 65% modello nostro + 35% prior bookmaker (solo 1X2)
+      // Blending: 70% modello nostro + 30% prior bookmaker (solo 1X2)
       if (bookmakerOdds && bookmakerOdds.home > 0) {
         const BOOK_WEIGHT = 0.30; // 30% bookmaker
         const MODEL_WEIGHT = 1 - BOOK_WEIGHT;
@@ -4768,8 +4469,7 @@ async function analyzeMatch(match) {
         lineupsAvailable: lineupsAvailable || false,
         bookmakerOdds: bookmakerOdds || null,
         homeFatigue: homeFatigue || 1.0,
-        awayFatigue: awayFatigue || 1.0,
-        contextPressure: contextPressure || null
+        awayFatigue: awayFatigue || 1.0
       };
     }
 
@@ -7414,10 +7114,10 @@ async function analyzeMatch(match) {
       const agreeSources = sources.filter(s => s.pick === winner.pick).length;
       const agreement = totalSources > 0 ? (agreeSources / totalSources * 100) : 0;
       
-      // Confidence calibrata — MASSIMA richiede 3+ fonti concordanti
+      // Confidence calibrata
       let confidence = 'medium', confidenceColor = '#fbbf24';
-      if (agreement >= 80 && winner.maxProb >= 60 && totalSources >= 3) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
-      else if (agreement >= 60 && winner.maxProb >= 55 && totalSources >= 2) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
+      if (agreement >= 80 && winner.maxProb >= 60) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
+      else if (agreement >= 60 && winner.maxProb >= 55) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
       else if (agreement >= 40) { confidence = 'MEDIA'; confidenceColor = '#fbbf24'; }
       else { confidence = 'BASSA'; confidenceColor = '#f87171'; }
       
@@ -7761,282 +7461,318 @@ async function analyzeMatch(match) {
 
     // === NG INSIGHT — Indicatore intelligente No Goal ===
     // Legge SOLO dati esistenti — ZERO impatto sull'algoritmo
-    // ═══ REVERSE QUOTE PROTOCOL — GG/NG + Over/Under ═══
-    // Confronta le probabilità del modello con quelle implicite dei bookmaker
-    // Sostituisce NG Insight + GG Insight con un'analisi più affidabile
-    function renderReverseQuoteProtocol(match, d) {
+    function renderNGInsight(match, d) {
       const pBTTS = d.pBTTS || 50;
       const ngProb = 100 - pBTTS;
-      const pOU = d.pOU || {};
+      const hD = d.homeData || {};
+      const aD = d.awayData || {};
       const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
-      const oddsLab = state.oddsLab;
-
-      // Raccogli quote medie dai bookmaker
-      let avgGG = 0, avgNG = 0, ggCount = 0;
-      let avgOver = 0, avgUnder = 0, ouCount = 0;
-      let sharpGG = null, sharpNG = null, sharpOver = null, sharpUnder = null;
-
-      if (oddsLab && oddsLab.bookmakers) {
-        oddsLab.bookmakers.forEach(function(bk) {
-          if (bk.btts) {
-            avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++;
-            if (bk.isSharp && !sharpGG) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; }
-          }
-          if (bk.ou25) {
-            avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++;
-            if (bk.isSharp && !sharpOver) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; }
-          }
-        });
+      const hCS = hD.cleanSheetPct || 25;
+      const aCS = aD.cleanSheetPct || 25;
+      const hFTS = hD.failedToScorePct || 25;
+      const aFTS = aD.failedToScorePct || 25;
+      
+      // Calcola segnali NG
+      const signals = [];
+      let ngScore = 0;
+      
+      // 1. Probabilità diretta NG
+      if (ngProb >= 55) { ngScore += 20; signals.push({ text: 'NG al ' + ngProb.toFixed(0) + '% (Poisson+DC)', icon: '📊', positive: true }); }
+      else if (ngProb >= 48) { ngScore += 10; signals.push({ text: 'NG al ' + ngProb.toFixed(0) + '% — zona neutrale', icon: '📊', positive: false }); }
+      else { ngScore -= 10; signals.push({ text: 'GG favorito al ' + pBTTS.toFixed(0) + '% — NG sfavorevole', icon: '📊', positive: false }); }
+      
+      // 2. Clean sheet alta di almeno una squadra
+      if (hCS >= 40 || aCS >= 40) {
+        const bestCS = Math.max(hCS, aCS);
+        const team = hCS >= aCS ? match.home.name : match.away.name;
+        ngScore += 18;
+        signals.push({ text: team + ': clean sheet ' + bestCS.toFixed(0) + '% — difesa dominante', icon: '🧱', positive: true });
+      } else if (hCS >= 30 || aCS >= 30) {
+        const bestCS = Math.max(hCS, aCS);
+        const team = hCS >= aCS ? match.home.name : match.away.name;
+        ngScore += 8;
+        signals.push({ text: team + ': clean sheet ' + bestCS.toFixed(0) + '% — difesa solida', icon: '🧱', positive: true });
       }
-
-      if (ggCount > 0) { avgGG /= ggCount; avgNG /= ggCount; }
-      if (ouCount > 0) { avgOver /= ouCount; avgUnder /= ouCount; }
-
-      // Calcola probabilità implicite (senza margine)
-      function impliedProbs(odd1, odd2) {
-        if (!odd1 || !odd2 || odd1 <= 1 || odd2 <= 1) return null;
-        var tot = 1/odd1 + 1/odd2;
-        return { p1: (1/odd1/tot)*100, p2: (1/odd2/tot)*100, margin: ((tot-1)*100).toFixed(1) };
+      
+      // 3. Failed to score di almeno una squadra
+      if (hFTS >= 35 || aFTS >= 35) {
+        const worstFTS = Math.max(hFTS, aFTS);
+        const team = hFTS >= aFTS ? match.home.name : match.away.name;
+        ngScore += 18;
+        signals.push({ text: team + ': non segna nel ' + worstFTS.toFixed(0) + '% — attacco sterile', icon: '🚫', positive: true });
+      } else if (hFTS >= 25 || aFTS >= 25) {
+        const worstFTS = Math.max(hFTS, aFTS);
+        const team = hFTS >= aFTS ? match.home.name : match.away.name;
+        ngScore += 5;
+        signals.push({ text: team + ': non segna nel ' + worstFTS.toFixed(0) + '%', icon: '🚫', positive: false });
       }
-
-      var ggImpl = impliedProbs(avgGG, avgNG);
-      var ouImpl = impliedProbs(avgOver, avgUnder);
-      var sharpGGImpl = impliedProbs(sharpGG, sharpNG);
-      var sharpOUImpl = impliedProbs(sharpOver, sharpUnder);
-
-      // === CALCOLA DELTA E VERDETTI ===
-      var markets = [];
-
-      // GG/NG
-      if (ggImpl) {
-        var deltaGG = pBTTS - ggImpl.p1;
-        var deltaNG = ngProb - ggImpl.p2;
-        var bestPick, bestDelta, bestColor, bestIcon, bestProb, bookProb;
-
-        if (deltaGG > 5) {
-          bestPick = 'GG'; bestDelta = deltaGG; bestColor = '#10b981'; bestIcon = '💎';
-          bestProb = pBTTS; bookProb = ggImpl.p1;
-        } else if (deltaNG > 5) {
-          bestPick = 'NG'; bestDelta = deltaNG; bestColor = '#10b981'; bestIcon = '💎';
-          bestProb = ngProb; bookProb = ggImpl.p2;
-        } else {
-          bestPick = pBTTS >= ngProb ? 'GG' : 'NG'; bestDelta = 0; bestColor = '#94a3b8'; bestIcon = '⚖️';
-          bestProb = Math.max(pBTTS, ngProb); bookProb = pBTTS >= ngProb ? ggImpl.p1 : ggImpl.p2;
-        }
-
-        // DIVERGENZA: modello e bookmaker non concordano → downgrade il colore
-        var modelPick_gg = pBTTS >= ngProb ? 'GG' : 'NG';
-        var bookPick_gg = ggImpl.p1 >= ggImpl.p2 ? 'GG' : 'NG';
-        var hasDivergence_gg = modelPick_gg !== bookPick_gg;
-        
-        if (hasDivergence_gg) {
-          bestColor = '#f59e0b'; // giallo/arancione, MAI verde quando divergono
-          bestIcon = '⚠️';
-        }
-
-        var verdict = '';
-        if (hasDivergence_gg) {
-          if (bestDelta > 15) verdict = 'CAUTELA: il modello vede VALUE su ' + bestPick + ' (Δ+' + bestDelta.toFixed(1) + ') ma il bookmaker la pensa diversamente. Rischio alto.';
-          else verdict = 'DIVERGENZA: Modello e Bookmaker non concordano. Mercato incerto — meglio evitare.';
-        } else {
-          if (bestDelta > 15) verdict = 'VALUE FORTE: modello e bookmaker concordano su ' + bestPick + '. Bookmaker sottostima di ' + bestDelta.toFixed(1) + ' punti.';
-          else if (bestDelta > 5) verdict = 'VALUE: leggero vantaggio su ' + bestPick + ' con concordanza (Δ+' + bestDelta.toFixed(1) + ')';
-          else verdict = 'Quote allineate — modello e bookmaker concordano su ' + bestPick;
-        }
-
-        markets.push({
-          title: 'GG / NG',
-          icon: '⚽',
-          modelPick: pBTTS >= ngProb ? 'GG' : 'NG',
-          modelProb: Math.max(pBTTS, ngProb),
-          bookPick: ggImpl.p1 >= ggImpl.p2 ? 'GG' : 'NG',
-          bookProb: Math.max(ggImpl.p1, ggImpl.p2),
-          rows: [
-            { label: 'GG', quota: avgGG, modelP: pBTTS, bookP: ggImpl.p1, delta: pBTTS - ggImpl.p1, sharpQuota: sharpGG },
-            { label: 'NG', quota: avgNG, modelP: ngProb, bookP: ggImpl.p2, delta: ngProb - ggImpl.p2, sharpQuota: sharpNG }
-          ],
-          margin: ggImpl.margin,
-          bestPick: bestPick,
-          bestDelta: bestDelta,
-          bestColor: bestColor,
-          bestIcon: bestIcon,
-          verdict: verdict
-        });
+      
+      // 4. xG basso di una squadra
+      const lowXG = Math.min(xG.home, xG.away);
+      const lowXGTeam = xG.home < xG.away ? match.home.name : match.away.name;
+      if (lowXG < 0.8) {
+        ngScore += 16;
+        signals.push({ text: lowXGTeam + ': xG solo ' + lowXG.toFixed(2) + ' — improbabile che segni', icon: '📉', positive: true });
+      } else if (lowXG < 1.0) {
+        ngScore += 8;
+        signals.push({ text: lowXGTeam + ': xG ' + lowXG.toFixed(2) + ' — attacco limitato', icon: '📉', positive: true });
       }
-
-      // Over/Under 2.5
-      if (ouImpl && pOU[2.5]) {
-        var overP = pOU[2.5].over;
-        var underP = pOU[2.5].under;
-        var deltaOver = overP - ouImpl.p1;
-        var deltaUnder = underP - ouImpl.p2;
-        var bestPick2, bestDelta2, bestColor2, bestIcon2;
-
-        if (deltaOver > 5) {
-          bestPick2 = 'Over 2.5'; bestDelta2 = deltaOver; bestColor2 = '#10b981'; bestIcon2 = '💎';
-        } else if (deltaUnder > 5) {
-          bestPick2 = 'Under 2.5'; bestDelta2 = deltaUnder; bestColor2 = '#10b981'; bestIcon2 = '💎';
-        } else {
-          bestPick2 = overP >= underP ? 'Over 2.5' : 'Under 2.5'; bestDelta2 = 0; bestColor2 = '#94a3b8'; bestIcon2 = '⚖️';
-        }
-
-        // DIVERGENZA Over/Under
-        var modelPick_ou = overP >= underP ? 'Over 2.5' : 'Under 2.5';
-        var bookPick_ou = ouImpl.p1 >= ouImpl.p2 ? 'Over 2.5' : 'Under 2.5';
-        var hasDivergence_ou = modelPick_ou !== bookPick_ou;
-        
-        if (hasDivergence_ou) {
-          bestColor2 = '#f59e0b';
-          bestIcon2 = '⚠️';
-        }
-
-        var verdict2 = '';
-        if (hasDivergence_ou) {
-          if (bestDelta2 > 15) verdict2 = 'CAUTELA: il modello vede VALUE su ' + bestPick2 + ' (Δ+' + bestDelta2.toFixed(1) + ') ma il bookmaker la pensa diversamente. Rischio alto.';
-          else verdict2 = 'DIVERGENZA: Modello e Bookmaker non concordano. Mercato incerto — meglio evitare.';
-        } else {
-          if (bestDelta2 > 15) verdict2 = 'VALUE FORTE: modello e bookmaker concordano su ' + bestPick2 + '. Bookmaker sottostima di ' + bestDelta2.toFixed(1) + ' punti.';
-          else if (bestDelta2 > 5) verdict2 = 'VALUE: leggero vantaggio su ' + bestPick2 + ' con concordanza (Δ+' + bestDelta2.toFixed(1) + ')';
-          else verdict2 = 'Quote allineate — modello e bookmaker concordano su ' + bestPick2;
-        }
-
-        markets.push({
-          title: 'Over / Under 2.5',
-          icon: '📊',
-          modelPick: overP >= underP ? 'Over 2.5' : 'Under 2.5',
-          modelProb: Math.max(overP, underP),
-          bookPick: ouImpl.p1 >= ouImpl.p2 ? 'Over 2.5' : 'Under 2.5',
-          bookProb: Math.max(ouImpl.p1, ouImpl.p2),
-          rows: [
-            { label: 'Over 2.5', quota: avgOver, modelP: overP, bookP: ouImpl.p1, delta: overP - ouImpl.p1, sharpQuota: sharpOver },
-            { label: 'Under 2.5', quota: avgUnder, modelP: underP, bookP: ouImpl.p2, delta: underP - ouImpl.p2, sharpQuota: sharpUnder }
-          ],
-          margin: ouImpl.margin,
-          bestPick: bestPick2,
-          bestDelta: bestDelta2,
-          bestColor: bestColor2,
-          bestIcon: bestIcon2,
-          verdict: verdict2
-        });
+      
+      // 5. xG totale basso
+      if (xG.total < 2.0) {
+        ngScore += 12;
+        signals.push({ text: 'xG totale ' + xG.total.toFixed(2) + ' — partita da pochi gol', icon: '🔒', positive: true });
       }
-
+      
+      // 6. Entrambe le difese sono deboli = penalità NG
+      if (hCS < 20 && aCS < 20) {
+        ngScore -= 15;
+        signals.push({ text: 'Entrambe con clean sheet sotto 20% — difese fragili', icon: '⚠️', positive: false });
+      }
+      
+      // 7. Entrambe segnano spesso = penalità NG
+      if (hD.goalsFor >= 1.8 && aD.goalsFor >= 1.8) {
+        ngScore -= 12;
+        signals.push({ text: 'Entrambe segnano 1.8+ gol/g — attacchi prolifici', icon: '⚠️', positive: false });
+      }
+      
+      // Normalizza 0-100
+      ngScore = Math.max(0, Math.min(100, ngScore));
+      
+      var level, label, color;
+      if (ngScore >= 60) { level = 'strong'; label = 'NG FORTE'; color = '#10b981'; }
+      else if (ngScore >= 40) { level = 'moderate'; label = 'NG POSSIBILE'; color = '#fbbf24'; }
+      else if (ngScore >= 20) { level = 'weak'; label = 'NG DEBOLE'; color = '#f97316'; }
+      else { level = 'avoid'; label = 'EVITA NG'; color = '#ef4444'; }
+      
       // === RENDERING ===
-      if (markets.length === 0) {
-        return '<div style="padding:16px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ In attesa delle quote bookmaker per il Reverse Quote Protocol...</div>';
+      var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
+      
+      // Hero bar
+      var radius = 36;
+      var circumference = 2 * Math.PI * radius;
+      var dashoffset = circumference - (ngScore / 100) * circumference;
+      
+      html += '<div style="display:flex;align-items:center;gap:16px;padding:14px;background:rgba(' + (level === 'strong' ? '16,185,129' : level === 'moderate' ? '251,191,36' : level === 'weak' ? '249,115,22' : '239,68,68') + ',0.06);border:1.5px solid ' + color + '30;border-radius:14px;">';
+      
+      // Cerchio
+      html += '<div style="flex-shrink:0;position:relative;width:80px;height:80px;">';
+      html += '<svg width="80" height="80" viewBox="0 0 80 80" style="transform:rotate(-90deg);">';
+      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="5"/>';
+      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + circumference.toFixed(1) + '" stroke-dashoffset="' + dashoffset.toFixed(1) + '"/>';
+      html += '</svg>';
+      html += '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">';
+      html += '<div style="font-size:1.3rem;font-weight:900;color:' + color + ';">' + ngScore + '</div>';
+      html += '<div style="font-size:0.45rem;color:var(--text-dark);font-weight:600;">NG SCORE</div>';
+      html += '</div></div>';
+      
+      // Info
+      html += '<div style="flex:1;">';
+      html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-bottom:3px;">Indicatore No Goal</div>';
+      html += '<div style="font-size:1.05rem;font-weight:900;color:' + color + ';margin-bottom:2px;">' + label + '</div>';
+      html += '<div style="font-size:0.78rem;font-weight:700;color:white;">NG: ' + ngProb.toFixed(0) + '% <span style="font-size:0.65rem;color:var(--text-dark)">| GG: ' + pBTTS.toFixed(0) + '%</span></div>';
+      
+      if (level === 'strong') {
+        html += '<div style="font-size:0.62rem;color:#10b981;margin-top:3px;">✅ Condizioni ottimali per NG — giocabile in singola e multipla</div>';
+      } else if (level === 'moderate') {
+        html += '<div style="font-size:0.62rem;color:#fbbf24;margin-top:3px;">⚡ NG possibile — valuta come singola, rischio in multipla</div>';
+      } else if (level === 'weak') {
+        html += '<div style="font-size:0.62rem;color:#f97316;margin-top:3px;">⚠️ NG debole — sconsigliato, meglio GG o mercati gol</div>';
+      } else {
+        html += '<div style="font-size:0.62rem;color:#ef4444;margin-top:3px;">🚫 GG molto più probabile — evita NG</div>';
       }
-
-      var html = '<div style="display:flex;flex-direction:column;gap:16px;">';
-
-      markets.forEach(function(mkt) {
-        var bgGrad = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.06)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.05)' : 'rgba(148,163,184,0.04)';
-        var borderCol = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.25)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.2)' : 'rgba(148,163,184,0.15)';
-
-        html += '<div style="background:' + bgGrad + ';border:1.5px solid ' + borderCol + ';border-radius:14px;padding:16px;">';
-
-        // Header
-        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
-        html += '<div style="font-size:0.85rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.icon + ' ' + mkt.title + ' — Reverse Quote</div>';
-        html += '<span style="font-size:0.55rem;color:var(--text-dark);">Margine: ' + mkt.margin + '%</span>';
-        html += '</div>';
-
-        // Quote + Confronto grid
-        html += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">';
-        mkt.rows.forEach(function(r) {
-          var deltaColor = r.delta > 5 ? '#10b981' : r.delta < -5 ? '#ef4444' : '#94a3b8';
-          var isValue = r.delta > 5;
-          var isTrap = r.delta < -10;
-
-          html += '<div style="display:flex;align-items:center;gap:6px;padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border:1px solid ' + (isValue ? 'rgba(16,185,129,0.3)' : isTrap ? 'rgba(239,68,68,0.2)' : 'transparent') + ';">';
-
-          // Label
-          html += '<div style="width:65px;font-size:0.72rem;font-weight:700;color:white;">' + r.label + '</div>';
-
-          // Quota media
-          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Quota</div><div style="font-weight:800;color:#f59e0b;font-size:0.95rem;">' + (r.quota ? r.quota.toFixed(2) : '—') + '</div></div>';
-
-          // Prob Bookmaker
-          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Book</div><div style="font-weight:700;color:#f59e0b;font-size:0.85rem;">' + r.bookP.toFixed(1) + '%</div></div>';
-
-          // Prob Modello
-          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Modello</div><div style="font-weight:700;color:#60a5fa;font-size:0.85rem;">' + r.modelP.toFixed(1) + '%</div></div>';
-
-          // Delta
-          html += '<div style="flex:1;text-align:center;"><div style="font-size:0.5rem;color:var(--text-dark);">Delta</div><div style="font-weight:800;color:' + deltaColor + ';font-size:0.85rem;">' + (r.delta > 0 ? '+' : '') + r.delta.toFixed(1) + '%</div></div>';
-
-          // Value badge
-          if (isValue) html += '<div style="font-size:0.5rem;background:rgba(16,185,129,0.15);color:#10b981;padding:2px 6px;border-radius:6px;font-weight:800;">VALUE</div>';
-          else if (isTrap) html += '<div style="font-size:0.5rem;background:rgba(239,68,68,0.12);color:#ef4444;padding:2px 6px;border-radius:6px;font-weight:800;">TRAP</div>';
-
-          html += '</div>';
-        });
-        html += '</div>';
-
-        // Sharp vs modello
-        if (mkt.rows[0].sharpQuota) {
-          html += '<div style="font-size:0.6rem;color:var(--text-dark);margin-bottom:8px;">⭐ Sharp: ' + mkt.rows[0].label + ' @' + mkt.rows[0].sharpQuota.toFixed(2) + ' | ' + mkt.rows[1].label + ' @' + mkt.rows[1].sharpQuota.toFixed(2) + '</div>';
-        }
-
-        // Verdetto
-        html += '<div style="padding:10px;background:rgba(0,0,0,0.15);border-radius:10px;border-left:3px solid ' + mkt.bestColor + ';">';
-        html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
-        html += '<div style="font-size:0.78rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.bestIcon + ' Verdetto: ' + mkt.bestPick + '</div>';
-        if (mkt.bestDelta > 5) {
-          html += '<span style="font-size:0.6rem;background:' + mkt.bestColor + '20;color:' + mkt.bestColor + ';padding:3px 10px;border-radius:20px;font-weight:700;">Δ+' + mkt.bestDelta.toFixed(1) + '%</span>';
-        }
-        html += '</div>';
-        html += '<div style="font-size:0.65rem;color:var(--text-gray);margin-top:4px;">' + mkt.verdict + '</div>';
-
-        // Confronto modello vs book + AZIONE CONSIGLIATA
-        if (mkt.modelPick !== mkt.bookPick) {
-          // Determina chi è più affidabile
-          var bookIsClose = Math.abs(mkt.bookProb - 50) < 5; // book quasi 50/50
-          var modelIsStrong = mkt.modelProb >= 65;
-          
-          html += '<div style="margin-top:8px;padding:10px;background:rgba(245,158,11,0.08);border:1.5px solid rgba(245,158,11,0.3);border-radius:10px;">';
-          html += '<div style="font-size:0.72rem;font-weight:800;color:#f59e0b;margin-bottom:6px;">⚠️ DIVERGENZA — Modello vs Bookmaker</div>';
-          html += '<div style="display:flex;gap:8px;margin-bottom:8px;">';
-          html += '<div style="flex:1;padding:8px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello dice</div><div style="font-size:0.85rem;font-weight:800;color:#60a5fa;">' + mkt.modelPick + '</div><div style="font-size:0.65rem;color:#60a5fa;">' + mkt.modelProb.toFixed(0) + '%</div></div>';
-          html += '<div style="display:flex;align-items:center;font-size:1.2rem;color:#f59e0b;">≠</div>';
-          html += '<div style="flex:1;padding:8px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Bookmaker dice</div><div style="font-size:0.85rem;font-weight:800;color:#f59e0b;">' + mkt.bookPick + '</div><div style="font-size:0.65rem;color:#f59e0b;">' + mkt.bookProb.toFixed(0) + '%</div></div>';
-          html += '</div>';
-          
-          // AZIONE CONSIGLIATA
-          html += '<div style="padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;border-left:3px solid #f59e0b;">';
-          html += '<div style="font-size:0.65rem;font-weight:800;color:#fbbf24;margin-bottom:4px;">📋 AZIONE CONSIGLIATA:</div>';
-          if (bookIsClose) {
-            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Il bookmaker è quasi 50/50 (' + mkt.bookProb.toFixed(0) + '%) → mercato incerto. <b style="color:#ef4444;">SKIP</b> — non giocare questo mercato. Nessuno dei due è affidabile.</div>';
-          } else if (modelIsStrong && mkt.bestDelta > 15) {
-            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Il modello è convinto (' + mkt.modelProb.toFixed(0) + '%) con delta alto. <b style="color:#f59e0b;">SINGOLA CAUTELA</b> — se giochi, solo singola con stake minimo (Difficile). Il bookmaker potrebbe avere info che il modello non ha.</div>';
-          } else {
-            html += '<div style="font-size:0.65rem;color:var(--text-gray);line-height:1.5;">Modello e bookmaker discordano. <b style="color:#ef4444;">SKIP</b> — evita questo mercato e cerca partite dove concordano.</div>';
-          }
-          html += '</div></div>';
-        } else {
-          // CONCORDANZA
-          var concordLevel = mkt.bestDelta > 15 ? 'FORTE' : mkt.bestDelta > 5 ? 'BUONA' : 'BASE';
-          var concordAction = mkt.bestDelta > 15 ? 'GIOCA con fiducia — singola o multipla' : mkt.bestDelta > 5 ? 'GIOCABILE in singola' : 'Segnale neutro — nessun vantaggio';
-          var concordColor = mkt.bestDelta > 15 ? '#10b981' : mkt.bestDelta > 5 ? '#00d4ff' : '#94a3b8';
-          
-          html += '<div style="margin-top:8px;padding:10px;background:rgba(16,185,129,0.06);border:1.5px solid rgba(16,185,129,0.2);border-radius:10px;">';
-          html += '<div style="font-size:0.72rem;font-weight:800;color:#10b981;margin-bottom:6px;">✅ CONCORDANZA ' + concordLevel + ' — Modello e Bookmaker d\'accordo</div>';
-          html += '<div style="display:flex;gap:8px;margin-bottom:8px;">';
-          html += '<div style="flex:1;padding:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Entrambi dicono</div><div style="font-size:1rem;font-weight:900;color:#10b981;">' + mkt.modelPick + '</div></div>';
-          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello</div><div style="font-weight:700;color:#60a5fa;">' + mkt.modelProb.toFixed(0) + '%</div></div>';
-          html += '<div style="flex:1;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Bookmaker</div><div style="font-weight:700;color:#f59e0b;">' + mkt.bookProb.toFixed(0) + '%</div></div>';
-          html += '</div>';
-          html += '<div style="padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;border-left:3px solid ' + concordColor + ';">';
-          html += '<div style="font-size:0.65rem;font-weight:800;color:' + concordColor + ';margin-bottom:2px;">📋 AZIONE: ' + concordAction + '</div>';
-          if (mkt.bestDelta > 5) html += '<div style="font-size:0.6rem;color:var(--text-dark);">Il bookmaker sottostima ' + mkt.bestPick + ' di ' + mkt.bestDelta.toFixed(1) + ' punti → edge reale.</div>';
-          html += '</div></div>';
-        }
-
-        html += '</div>';
-        html += '</div>';
+      html += '</div></div>';
+      
+      // Segnali
+      html += '<div style="display:flex;flex-direction:column;gap:5px;">';
+      signals.forEach(function(s) {
+        var bg = s.positive ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.04)';
+        var border = s.positive ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.08)';
+        var textCol = s.positive ? 'var(--text-gray)' : 'var(--text-dark)';
+        html += '<div style="padding:7px 10px;background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;font-size:0.65rem;color:' + textCol + ';">' + s.icon + ' ' + s.text + '</div>';
       });
+      html += '</div>';
+      
+      // Consiglio combo NG
+      if (level === 'strong' || level === 'moderate') {
+        var pOU = d.pOU || {};
+        html += '<div style="padding:10px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:10px;">';
+        html += '<div style="font-size:0.65rem;font-weight:700;color:#10b981;margin-bottom:6px;">💡 Combo NG consigliate:</div>';
+        var combos = [];
+        if (pOU[2.5] && pOU[2.5].under >= 45) {
+          combos.push('NG + Under 2.5 → ' + ((ngProb * pOU[2.5].under) / 100).toFixed(0) + '% @' + (10000 / (ngProb * pOU[2.5].under)).toFixed(2));
+        }
+        if (pOU[3.5] && pOU[3.5].under >= 55) {
+          combos.push('NG + Under 3.5 → ' + ((ngProb * pOU[3.5].under) / 100).toFixed(0) + '% @' + (10000 / (ngProb * pOU[3.5].under)).toFixed(2));
+        }
+        var p1X2 = d.p1X2 || {};
+        if (p1X2.home >= 55) {
+          combos.push('NG + 1 (Casa) → ' + ((ngProb * p1X2.home) / 100).toFixed(0) + '% @' + (10000 / (ngProb * p1X2.home)).toFixed(2));
+        } else if (p1X2.away >= 55) {
+          combos.push('NG + 2 (Ospite) → ' + ((ngProb * p1X2.away) / 100).toFixed(0) + '% @' + (10000 / (ngProb * p1X2.away)).toFixed(2));
+        }
+        if (combos.length > 0) {
+          html += '<div style="display:flex;flex-direction:column;gap:4px;">';
+          combos.forEach(function(c) {
+            html += '<div style="font-size:0.62rem;color:var(--text-gray);padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:6px;">• ' + c + '</div>';
+          });
+          html += '</div>';
+        } else {
+          html += '<div style="font-size:0.62rem;color:var(--text-dark);">Nessuna combo particolarmente forte per questa partita.</div>';
+        }
+        html += '</div>';
+      }
+      
+      html += '</div>';
+      return html;
+    }
 
-      // xG info di supporto
-      html += '<div style="font-size:0.58rem;color:var(--text-dark);text-align:center;padding:6px;">ℹ️ xG Totale: ' + xG.total.toFixed(2) + ' (' + match.home.name + ' ' + xG.home.toFixed(2) + ' vs ' + match.away.name + ' ' + xG.away.toFixed(2) + ') — Usato per calibrare le probabilità del modello</div>';
+    // renderBettingExchange rimossa
 
+    // === GG INSIGHT — Indicatore intelligente Goal/Goal ===
+    // Legge SOLO dati esistenti — ZERO impatto sull'algoritmo
+    function renderGGInsight(match, d) {
+      const pBTTS = d.pBTTS || 50;
+      const hD = d.homeData || {};
+      const aD = d.awayData || {};
+      const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
+      const hCS = hD.cleanSheetPct || 25;
+      const aCS = aD.cleanSheetPct || 25;
+      const hFTS = hD.failedToScorePct || 25;
+      const aFTS = aD.failedToScorePct || 25;
+      
+      var signals = [];
+      var ggScore = 0;
+      
+      // 1. Probabilità diretta GG
+      if (pBTTS >= 58) { ggScore += 22; signals.push({ text: 'GG al ' + pBTTS.toFixed(0) + '% (Poisson+DC) — entrambe segnano spesso', icon: '📊', positive: true }); }
+      else if (pBTTS >= 50) { ggScore += 12; signals.push({ text: 'GG al ' + pBTTS.toFixed(0) + '% — zona equilibrata', icon: '📊', positive: true }); }
+      else { ggScore -= 10; signals.push({ text: 'NG favorito al ' + (100 - pBTTS).toFixed(0) + '% — GG sfavorevole', icon: '📊', positive: false }); }
+      
+      // 2. Entrambe segnano bene (goalsFor)
+      if (hD.goalsFor >= 1.5 && aD.goalsFor >= 1.2) {
+        ggScore += 18;
+        signals.push({ text: 'Entrambe offensive: ' + match.home.name + ' ' + hD.goalsFor.toFixed(1) + ' gol/g, ' + match.away.name + ' ' + aD.goalsFor.toFixed(1) + ' gol/g', icon: '⚽', positive: true });
+      } else if (hD.goalsFor >= 1.3 && aD.goalsFor >= 1.0) {
+        ggScore += 8;
+        signals.push({ text: 'Attacchi discreti: ' + hD.goalsFor.toFixed(1) + ' e ' + aD.goalsFor.toFixed(1) + ' gol/g', icon: '⚽', positive: true });
+      }
+      
+      // 3. Clean sheet bassa di ENTRAMBE = difese fragili
+      if (hCS < 25 && aCS < 25) {
+        ggScore += 18;
+        signals.push({ text: 'Difese fragili: CS ' + hCS.toFixed(0) + '% e ' + aCS.toFixed(0) + '% — entrambe subiscono spesso', icon: '🚪', positive: true });
+      } else if (hCS < 30 && aCS < 30) {
+        ggScore += 8;
+        signals.push({ text: 'Difese non impenetrabili: CS ' + hCS.toFixed(0) + '% e ' + aCS.toFixed(0) + '%', icon: '🚪', positive: true });
+      }
+      
+      // 4. Failed to Score basso di ENTRAMBE = segnano quasi sempre
+      if (hFTS < 20 && aFTS < 20) {
+        ggScore += 16;
+        signals.push({ text: 'Entrambe segnano quasi sempre: FTS ' + hFTS.toFixed(0) + '% e ' + aFTS.toFixed(0) + '%', icon: '🎯', positive: true });
+      }
+      
+      // 5. xG alto di entrambe
+      if (xG.home >= 1.3 && xG.away >= 1.0) {
+        ggScore += 12;
+        signals.push({ text: 'xG alti: ' + xG.home.toFixed(2) + ' vs ' + xG.away.toFixed(2) + ' — entrambe pericolose', icon: '📈', positive: true });
+      }
+      
+      // 6. Penalità: una squadra non segna quasi mai
+      if (hFTS >= 40 || aFTS >= 40) {
+        var worstTeam = hFTS >= aFTS ? match.home.name : match.away.name;
+        var worstFTS = Math.max(hFTS, aFTS);
+        ggScore -= 18;
+        signals.push({ text: worstTeam + ': non segna nel ' + worstFTS.toFixed(0) + '% — rischio NG alto', icon: '⚠️', positive: false });
+      }
+      
+      // 7. Penalità: una difesa è un muro
+      if (hCS >= 45 || aCS >= 45) {
+        var wallTeam = hCS >= aCS ? match.home.name : match.away.name;
+        var wallCS = Math.max(hCS, aCS);
+        ggScore -= 15;
+        signals.push({ text: wallTeam + ': clean sheet ' + wallCS.toFixed(0) + '% — muro difensivo', icon: '⚠️', positive: false });
+      }
+      
+      ggScore = Math.max(0, Math.min(100, ggScore));
+      
+      var level, label, color;
+      if (ggScore >= 60) { level = 'strong'; label = 'GG FORTE'; color = '#10b981'; }
+      else if (ggScore >= 40) { level = 'moderate'; label = 'GG POSSIBILE'; color = '#fbbf24'; }
+      else if (ggScore >= 20) { level = 'weak'; label = 'GG DEBOLE'; color = '#f97316'; }
+      else { level = 'avoid'; label = 'EVITA GG'; color = '#ef4444'; }
+      
+      // === RENDERING ===
+      var html = '<div style="display:flex;flex-direction:column;gap:12px;">';
+      
+      var radius = 36;
+      var circumference = 2 * Math.PI * radius;
+      var dashoffset = circumference - (ggScore / 100) * circumference;
+      
+      html += '<div style="display:flex;align-items:center;gap:16px;padding:14px;background:rgba(' + (level === 'strong' ? '16,185,129' : level === 'moderate' ? '251,191,36' : level === 'weak' ? '249,115,22' : '239,68,68') + ',0.06);border:1.5px solid ' + color + '30;border-radius:14px;">';
+      
+      html += '<div style="flex-shrink:0;position:relative;width:80px;height:80px;">';
+      html += '<svg width="80" height="80" viewBox="0 0 80 80" style="transform:rotate(-90deg);">';
+      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="5"/>';
+      html += '<circle cx="40" cy="40" r="' + radius + '" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + circumference.toFixed(1) + '" stroke-dashoffset="' + dashoffset.toFixed(1) + '"/>';
+      html += '</svg>';
+      html += '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">';
+      html += '<div style="font-size:1.3rem;font-weight:900;color:' + color + ';">' + ggScore + '</div>';
+      html += '<div style="font-size:0.45rem;color:var(--text-dark);font-weight:600;">GG SCORE</div>';
+      html += '</div></div>';
+      
+      html += '<div style="flex:1;">';
+      html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-bottom:3px;">Indicatore Goal/Goal</div>';
+      html += '<div style="font-size:1.05rem;font-weight:900;color:' + color + ';margin-bottom:2px;">' + label + '</div>';
+      html += '<div style="font-size:0.78rem;font-weight:700;color:white;">GG: ' + pBTTS.toFixed(0) + '% <span style="font-size:0.65rem;color:var(--text-dark)">| NG: ' + (100 - pBTTS).toFixed(0) + '%</span></div>';
+      
+      if (level === 'strong') {
+        html += '<div style="font-size:0.62rem;color:#10b981;margin-top:3px;">✅ Condizioni ideali per GG — giocabile con fiducia</div>';
+      } else if (level === 'moderate') {
+        html += '<div style="font-size:0.62rem;color:#fbbf24;margin-top:3px;">⚡ GG possibile — valuta il contesto prima di giocare</div>';
+      } else if (level === 'weak') {
+        html += '<div style="font-size:0.62rem;color:#f97316;margin-top:3px;">⚠️ GG rischioso — una delle due potrebbe non segnare</div>';
+      } else {
+        html += '<div style="font-size:0.62rem;color:#ef4444;margin-top:3px;">🚫 NG più probabile — evita GG</div>';
+      }
+      html += '</div></div>';
+      
+      // Segnali
+      html += '<div style="display:flex;flex-direction:column;gap:5px;">';
+      signals.forEach(function(s) {
+        var bg = s.positive ? 'rgba(16,185,129,0.05)' : 'rgba(239,68,68,0.04)';
+        var border = s.positive ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.08)';
+        var textCol = s.positive ? 'var(--text-gray)' : 'var(--text-dark)';
+        html += '<div style="padding:7px 10px;background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;font-size:0.65rem;color:' + textCol + ';">' + s.icon + ' ' + s.text + '</div>';
+      });
+      html += '</div>';
+      
+      // Combo GG consigliate
+      if (level === 'strong' || level === 'moderate') {
+        var pOU = d.pOU || {};
+        html += '<div style="padding:10px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:10px;">';
+        html += '<div style="font-size:0.65rem;font-weight:700;color:#10b981;margin-bottom:6px;">💡 Combo GG consigliate:</div>';
+        var combos = [];
+        if (pOU[2.5] && pOU[2.5].over >= 50) {
+          combos.push('GG + Over 2.5 → ' + ((pBTTS * pOU[2.5].over) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[2.5].over)).toFixed(2));
+        }
+        if (pOU[3.5] && pOU[3.5].under >= 50) {
+          combos.push('GG + Under 3.5 → ' + ((pBTTS * pOU[3.5].under) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[3.5].under)).toFixed(2));
+        }
+        if (pOU[1.5] && pOU[1.5].over >= 65) {
+          combos.push('GG + Over 1.5 → ' + ((pBTTS * pOU[1.5].over) / 100).toFixed(0) + '% @' + (10000 / (pBTTS * pOU[1.5].over)).toFixed(2));
+        }
+        if (combos.length > 0) {
+          html += '<div style="display:flex;flex-direction:column;gap:4px;">';
+          combos.forEach(function(c) {
+            html += '<div style="font-size:0.62rem;color:var(--text-gray);padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:6px;">• ' + c + '</div>';
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      
       html += '</div>';
       return html;
     }
@@ -8326,6 +8062,238 @@ async function analyzeMatch(match) {
       render();
     }
     
+    // ═══ REVERSE QUOTE PROTOCOL ═══
+    function renderReverseQuoteProtocol(match, d) {
+      const pBTTS = d.pBTTS || 50;
+      const ngProb = 100 - pBTTS;
+      const pOU = d.pOU || {};
+      const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
+      const oddsLab = state.oddsLab;
+      let avgGG = 0, avgNG = 0, ggCount = 0;
+      let avgOver = 0, avgUnder = 0, ouCount = 0;
+      let sharpGG = null, sharpNG = null, sharpOver = null, sharpUnder = null;
+      if (oddsLab && oddsLab.bookmakers) {
+        oddsLab.bookmakers.forEach(function(bk) {
+          if (bk.btts) { avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++; if (bk.isSharp && !sharpGG) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; } }
+          if (bk.ou25) { avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++; if (bk.isSharp && !sharpOver) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; } }
+        });
+      }
+      if (ggCount > 0) { avgGG /= ggCount; avgNG /= ggCount; }
+      if (ouCount > 0) { avgOver /= ouCount; avgUnder /= ouCount; }
+      function impliedProbs(odd1, odd2) {
+        if (!odd1 || !odd2 || odd1 <= 1 || odd2 <= 1) return null;
+        var tot = 1/odd1 + 1/odd2;
+        return { p1: (1/odd1/tot)*100, p2: (1/odd2/tot)*100, margin: ((tot-1)*100).toFixed(1) };
+      }
+      var markets = [];
+      var ggImpl = impliedProbs(avgGG, avgNG);
+      if (ggImpl) {
+        var ggDelta = pBTTS - ggImpl.p1, ngDelta = ngProb - ggImpl.p2;
+        var bestPick1, bestDelta1, bestColor1, bestIcon1, verdict1;
+        if (Math.abs(ggDelta) >= Math.abs(ngDelta)) { bestPick1 = 'GG'; bestDelta1 = ggDelta; } else { bestPick1 = 'NG'; bestDelta1 = ngDelta; }
+        if (bestDelta1 > 15) { bestColor1 = '#10b981'; bestIcon1 = '🟢'; verdict1 = 'VALUE FORTE'; }
+        else if (bestDelta1 > 5) { bestColor1 = '#22c55e'; bestIcon1 = '🟢'; verdict1 = 'VALUE'; }
+        else if (bestDelta1 > -5) { bestColor1 = '#94a3b8'; bestIcon1 = '⚪'; verdict1 = 'ALLINEATI'; }
+        else if (bestDelta1 > -15) { bestColor1 = '#f59e0b'; bestIcon1 = '🟡'; verdict1 = 'ATTENZIONE'; }
+        else { bestColor1 = '#ef4444'; bestIcon1 = '🔴'; verdict1 = 'TRAPPOLA'; }
+        var modelPick1 = pBTTS >= 50 ? 'GG' : 'NG', bookPick1 = ggImpl.p1 >= 50 ? 'GG' : 'NG';
+        var divergence1 = modelPick1 !== bookPick1;
+        if (divergence1) { bestColor1 = '#eab308'; bestIcon1 = '🟡'; }
+        markets.push({ title: 'GG / NG', icon: '⚽', picks: [
+          { label: 'GG', quota: avgGG, modelP: pBTTS, bookP: ggImpl.p1, delta: ggDelta, sharpQuota: sharpGG },
+          { label: 'NG', quota: avgNG, modelP: ngProb, bookP: ggImpl.p2, delta: ngDelta, sharpQuota: sharpNG }
+        ], margin: ggImpl.margin, bestPick: bestPick1, bestDelta: bestDelta1, bestColor: bestColor1, bestIcon: bestIcon1, verdict: verdict1, divergence: divergence1, modelPick: modelPick1, bookPick: bookPick1 });
+      }
+      // FIX: pOU è indicizzato come pOU[1.5], pOU[2.5], pOU[3.5] - NON pOU.over25
+      var overP = (pOU && pOU[2.5] && typeof pOU[2.5].over === 'number') ? pOU[2.5].over : 50;
+      var underP = 100 - overP;
+      var ouImpl = impliedProbs(avgOver, avgUnder);
+      if (ouImpl) {
+        var overDelta = overP - ouImpl.p1, underDelta = underP - ouImpl.p2;
+        var bestPick2, bestDelta2, bestColor2, bestIcon2, verdict2;
+        if (Math.abs(overDelta) >= Math.abs(underDelta)) { bestPick2 = 'Over 2.5'; bestDelta2 = overDelta; } else { bestPick2 = 'Under 2.5'; bestDelta2 = underDelta; }
+        if (bestDelta2 > 15) { bestColor2 = '#10b981'; bestIcon2 = '🟢'; verdict2 = 'VALUE FORTE'; }
+        else if (bestDelta2 > 5) { bestColor2 = '#22c55e'; bestIcon2 = '🟢'; verdict2 = 'VALUE'; }
+        else if (bestDelta2 > -5) { bestColor2 = '#94a3b8'; bestIcon2 = '⚪'; verdict2 = 'ALLINEATI'; }
+        else if (bestDelta2 > -15) { bestColor2 = '#f59e0b'; bestIcon2 = '🟡'; verdict2 = 'ATTENZIONE'; }
+        else { bestColor2 = '#ef4444'; bestIcon2 = '🔴'; verdict2 = 'TRAPPOLA'; }
+        var modelPick2 = overP >= 50 ? 'Over 2.5' : 'Under 2.5', bookPick2 = ouImpl.p1 >= 50 ? 'Over 2.5' : 'Under 2.5';
+        var divergence2 = modelPick2 !== bookPick2;
+        if (divergence2) { bestColor2 = '#eab308'; bestIcon2 = '🟡'; }
+        markets.push({ title: 'Over / Under 2.5', icon: '📊', picks: [
+          { label: 'Over 2.5', quota: avgOver, modelP: overP, bookP: ouImpl.p1, delta: overDelta, sharpQuota: sharpOver },
+          { label: 'Under 2.5', quota: avgUnder, modelP: underP, bookP: ouImpl.p2, delta: underDelta, sharpQuota: sharpUnder }
+        ], margin: ouImpl.margin, bestPick: bestPick2, bestDelta: bestDelta2, bestColor: bestColor2, bestIcon: bestIcon2, verdict: verdict2, divergence: divergence2, modelPick: modelPick2, bookPick: bookPick2 });
+      }
+      if (markets.length === 0) {
+        if (state.oddsLab === false) return '<div style="padding:16px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Quote non disponibili per il Reverse Quote Protocol.</div>';
+        return '<div style="padding:16px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ In attesa delle quote bookmaker...</div>';
+      }
+      var html = '<div style="display:flex;flex-direction:column;gap:16px;">';
+      markets.forEach(function(mkt) {
+        var bgGrad = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.06)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.05)' : 'rgba(148,163,184,0.04)';
+        html += '<div style="border:1.5px solid ' + mkt.bestColor + '30;border-radius:14px;overflow:hidden;background:' + bgGrad + ';">';
+        html += '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:space-between;">';
+        html += '<div style="font-size:0.85rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.icon + ' ' + mkt.title + ' — Reverse Quote</div>';
+        html += '<div style="font-size:0.6rem;color:var(--text-dark);">Margine: ' + mkt.margin + '%</div></div>';
+        html += '<div style="padding:14px;">';
+        mkt.picks.forEach(function(p) {
+          var isWinner = (mkt.bestPick === p.label);
+          var rowBg = isWinner ? mkt.bestColor + '08' : 'transparent';
+          var deltaColor = p.delta > 5 ? '#10b981' : p.delta > 0 ? '#22c55e' : p.delta > -5 ? '#94a3b8' : '#ef4444';
+          html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;background:' + rowBg + ';margin-bottom:6px;border:1px solid ' + (isWinner ? mkt.bestColor + '20' : 'transparent') + ';">';
+          html += '<div><div style="font-size:0.82rem;font-weight:700;color:white;">' + p.label + '</div>';
+          html += '<div style="font-size:0.6rem;color:var(--text-dark);">Quota media: @' + (p.quota || 0).toFixed(2) + (p.sharpQuota ? ' • Sharp: @' + p.sharpQuota.toFixed(2) : '') + '</div></div>';
+          html += '<div style="display:flex;gap:14px;align-items:center;">';
+          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello</div><div style="font-size:0.9rem;font-weight:800;color:var(--accent-cyan);">' + p.modelP.toFixed(0) + '%</div></div>';
+          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Book</div><div style="font-size:0.9rem;font-weight:800;color:var(--text-gray);">' + p.bookP.toFixed(0) + '%</div></div>';
+          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Delta</div><div style="font-size:0.9rem;font-weight:800;color:' + deltaColor + ';">' + (p.delta > 0 ? '+' : '') + p.delta.toFixed(1) + '%</div></div>';
+          html += '</div></div>';
+        });
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:' + mkt.bestColor + '10;border:1.5px solid ' + mkt.bestColor + '30;margin-top:6px;">';
+        html += '<div style="font-size:1.2rem;">' + mkt.bestIcon + '</div>';
+        html += '<div style="flex:1;"><div style="font-size:0.78rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.verdict + ' — ' + mkt.bestPick + '</div>';
+        if (mkt.divergence) {
+          var action = '';
+          if (Math.abs(mkt.picks[0].bookP - 50) < 5) action = '⛔ SKIP — Book indeciso';
+          else if (Math.abs(mkt.bestDelta) > 15) action = '⚠️ SINGOLA CAUTELA — stake minimo';
+          else action = '⛔ SKIP — divergenza modello/book';
+          html += '<div style="font-size:0.62rem;color:#eab308;margin-top:2px;">⚠️ DIVERGENZA: Modello dice ' + mkt.modelPick + ', Book dice ' + mkt.bookPick + '</div>';
+          html += '<div style="font-size:0.65rem;color:white;font-weight:700;margin-top:3px;">' + action + '</div>';
+        } else {
+          if (mkt.bestDelta > 15) html += '<div style="font-size:0.65rem;color:white;font-weight:700;margin-top:2px;">✅ GIOCA con fiducia</div>';
+          else if (mkt.bestDelta > 5) html += '<div style="font-size:0.65rem;color:white;margin-top:2px;">✅ GIOCABILE singola</div>';
+          else html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-top:2px;">Neutro — nessun vantaggio chiaro</div>';
+        }
+        html += '</div></div></div></div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    // ═══ LIVE MOMENTUM ENGINE ═══
+    function extractLiveStats(statsData) {
+      var result = { shotsHome:0,shotsAway:0,shotsOnHome:0,shotsOnAway:0,cornersHome:0,cornersAway:0,possessionHome:50,possessionAway:50,xgHome:null,xgAway:null,dangerousHome:0,dangerousAway:0 };
+      if (!statsData || !statsData.response || statsData.response.length < 2) return result;
+      var homeStats = statsData.response[0]?.statistics || [], awayStats = statsData.response[1]?.statistics || [];
+      var getStat = function(arr, type) { var s = arr.find(function(s){return s.type===type}); if(!s||s.value===null)return 0; if(typeof s.value==='string')return parseInt(s.value.replace('%',''))||0; return parseInt(s.value)||0; };
+      var getStatFloat = function(arr, type) { var s = arr.find(function(s){return s.type===type}); if(!s||s.value===null)return null; return parseFloat(s.value)||null; };
+      result.shotsHome=getStat(homeStats,'Total Shots');result.shotsAway=getStat(awayStats,'Total Shots');result.shotsOnHome=getStat(homeStats,'Shots on Goal');result.shotsOnAway=getStat(awayStats,'Shots on Goal');result.cornersHome=getStat(homeStats,'Corner Kicks');result.cornersAway=getStat(awayStats,'Corner Kicks');result.possessionHome=getStat(homeStats,'Ball Possession');result.possessionAway=getStat(awayStats,'Ball Possession');result.xgHome=getStatFloat(homeStats,'expected_goals');result.xgAway=getStatFloat(awayStats,'expected_goals');result.dangerousHome=getStat(homeStats,'Dangerous Attacks')||0;result.dangerousAway=getStat(awayStats,'Dangerous Attacks')||0;
+      result.shotsTotal=result.shotsHome+result.shotsAway;result.shotsOnTotal=result.shotsOnHome+result.shotsOnAway;result.cornersTotal=result.cornersHome+result.cornersAway;result.dangerousTotal=result.dangerousHome+result.dangerousAway;
+      return result;
+    }
+    function extractLiveStatsFromInline(inlineStats) {
+      var result = { shotsHome:0,shotsAway:0,shotsOnHome:0,shotsOnAway:0,cornersHome:0,cornersAway:0,possessionHome:50,possessionAway:50,xgHome:null,xgAway:null,dangerousHome:0,dangerousAway:0 };
+      if (!inlineStats || inlineStats.length < 2) return result;
+      var getArr = function(e) { if(Array.isArray(e))return e; if(e&&e.statistics)return e.statistics; return[]; };
+      var hA=getArr(inlineStats[0]),aA=getArr(inlineStats[1]);
+      var getStat = function(arr, type) { var s = arr.find(function(s){return s.type===type}); if(!s||s.value===null)return 0; if(typeof s.value==='string')return parseInt(s.value.replace('%',''))||0; return parseInt(s.value)||0; };
+      result.shotsHome=getStat(hA,'Total Shots');result.shotsAway=getStat(aA,'Total Shots');result.shotsOnHome=getStat(hA,'Shots on Goal');result.shotsOnAway=getStat(aA,'Shots on Goal');result.cornersHome=getStat(hA,'Corner Kicks');result.cornersAway=getStat(aA,'Corner Kicks');result.possessionHome=getStat(hA,'Ball Possession')||50;result.possessionAway=getStat(aA,'Ball Possession')||50;result.dangerousHome=getStat(hA,'Dangerous Attacks')||0;result.dangerousAway=getStat(aA,'Dangerous Attacks')||0;
+      result.shotsTotal=result.shotsHome+result.shotsAway;result.shotsOnTotal=result.shotsOnHome+result.shotsOnAway;result.cornersTotal=result.cornersHome+result.cornersAway;result.dangerousTotal=result.dangerousHome+result.dangerousAway;
+      return result;
+    }
+    function extractStatsFromEvents(eventsData, match) {
+      var result = { shotsHome:0,shotsAway:0,shotsOnHome:0,shotsOnAway:0,cornersHome:0,cornersAway:0,possessionHome:50,possessionAway:50,shotsTotal:0,shotsOnTotal:0,cornersTotal:0,hasData:false,estimated:true };
+      if (!eventsData || !eventsData.response || eventsData.response.length === 0) return result;
+      eventsData.response.forEach(function(ev) { var isHome=ev.team?.id===match.home.id; if((ev.type||'').toLowerCase()==='goal'){if(isHome){result.shotsOnHome++;result.shotsHome++}else{result.shotsOnAway++;result.shotsAway++}result.hasData=true;} });
+      var el=match.elapsed||1;result.shotsHome=Math.max(result.shotsHome,Math.round(el*0.25*0.55));result.shotsAway=Math.max(result.shotsAway,Math.round(el*0.25*0.45));result.shotsOnHome=Math.max(result.shotsOnHome,Math.round(result.shotsHome*0.35));result.shotsOnAway=Math.max(result.shotsOnAway,Math.round(result.shotsAway*0.35));result.cornersHome=Math.round(el*0.12*0.55);result.cornersAway=Math.round(el*0.12*0.45);result.shotsTotal=result.shotsHome+result.shotsAway;result.shotsOnTotal=result.shotsOnHome+result.shotsOnAway;result.cornersTotal=result.cornersHome+result.cornersAway;result.hasData=true;
+      return result;
+    }
+    function extractPreMatchPrior(predData, match) {
+      var prior={homeWinChance:40,awayWinChance:30,drawChance:30,overHT:55,over25:50,btts:50,homeGoalsAvg:1.3,awayGoalsAvg:1.0,homeForm:'DDD',awayForm:'DDD',advice:'',xgPreMatch:2.4};
+      if(!predData||!predData.response||!predData.response[0])return prior;var pred=predData.response[0];
+      if(pred.predictions?.percent){prior.homeWinChance=parseInt(pred.predictions.percent.home)||40;prior.awayWinChance=parseInt(pred.predictions.percent.away)||30;prior.drawChance=parseInt(pred.predictions.percent.draw)||30;}
+      if(pred.predictions?.advice)prior.advice=pred.predictions.advice;
+      if(pred.teams?.home){var hl=pred.teams.home.last_5;if(hl){prior.homeGoalsAvg=parseFloat(hl.goals?.for?.average)||1.3;prior.homeForm=hl.form||'DDD';}if(pred.teams.home.league?.goals?.for?.average?.total)prior.homeGoalsAvg=parseFloat(pred.teams.home.league.goals.for.average.total)||1.3;}
+      if(pred.teams?.away){var al=pred.teams.away.last_5;if(al){prior.awayGoalsAvg=parseFloat(al.goals?.for?.average)||1.0;prior.awayForm=al.form||'DDD';}if(pred.teams.away.league?.goals?.for?.average?.total)prior.awayGoalsAvg=parseFloat(pred.teams.away.league.goals.for.average.total)||1.0;}
+      prior.xgPreMatch=prior.homeGoalsAvg+prior.awayGoalsAvg;prior.overHT=clamp(30,quickCalcOver(prior.homeGoalsAvg*0.45,prior.awayGoalsAvg*0.45,0.5),85);prior.over25=clamp(20,quickCalcOver(prior.homeGoalsAvg,prior.awayGoalsAvg,2.5),85);prior.btts=clamp(20,(1-Math.exp(-prior.homeGoalsAvg))*(1-Math.exp(-prior.awayGoalsAvg))*100,80);
+      return prior;
+    }
+    function calculateMomentumScore(match, stats, prior) {
+      var el=match.elapsed||0,tg=(match.goals?.home||0)+(match.goals?.away||0),hasReal=(stats.hasLiveData&&!stats.estimated)||!!stats.manual,lm=hasReal?1.0:0.5;
+      var soP=Math.min(20,(stats.shotsOnTotal||0)*4.0)*lm,stP=Math.min(8,(stats.shotsTotal||0)*0.8)*lm,daP=Math.min(12,(stats.dangerousTotal||0)*0.4)*lm;
+      var xgP=0;if(stats.xgHome!==null&&stats.xgAway!==null)xgP=Math.min(16,(stats.xgHome+stats.xgAway)*14.0);
+      var coP=Math.min(8,(stats.cornersTotal||0)*1.5)*lm,mp=Math.max(stats.possessionHome||50,stats.possessionAway||50),poP=0;
+      if(hasReal){if(mp>=65)poP=6;else if(mp>=62)poP=5;else if(mp>=59)poP=4;else if(mp>=56)poP=3;else if(mp>=53)poP=2;}
+      var gsP=0,fH=prior.homeWinChance>prior.awayWinChance+10,fA=prior.awayWinChance>prior.homeWinChance+10;
+      if(tg===0){gsP+=3;if(el>=60)gsP+=2;}if((fH&&(match.goals?.home||0)<(match.goals?.away||0))||(fA&&(match.goals?.away||0)<(match.goals?.home||0)))gsP+=4;if((match.goals?.home||0)===1&&(match.goals?.away||0)===1)gsP+=3;gsP=Math.min(7,gsP);
+      var ohM=hasReal?15:24,ohP=Math.min(ohM,(prior.overHT/100)*ohM),xpM=hasReal?12:20,xpP=0;
+      if(prior.xgPreMatch>=3.5)xpP=xpM;else if(prior.xgPreMatch>=3.0)xpP=Math.round(xpM*0.83);else if(prior.xgPreMatch>=2.5)xpP=Math.round(xpM*0.67);else if(prior.xgPreMatch>=2.0)xpP=Math.round(xpM*0.42);
+      var hW=(prior.homeForm.match(/W/g)||[]).length,aW=(prior.awayForm.match(/W/g)||[]).length,fM=hasReal?8:12,fpP=Math.min(fM,(hW+aW)*(hasReal?1.6:2.4));
+      var raw=soP+stP+daP+xgP+coP+poP+gsP+ohP+xpP+fpP,tm=1.0;
+      if(match.status==='1H'&&el>=20)tm=1+(el-20)*0.015;else if(match.status==='2H'&&el>=50)tm=1+(el-50)*0.012;else if(match.status==='HT')tm=1.1;
+      var sc=Math.min(100,Math.round(raw*tm));
+      return{score:sc,rawScore:Math.round(raw),timeMultiplier:tm.toFixed(2),hasRealLiveData:hasReal,estimated:!!stats.estimated,factors:{shotsOn:{pts:Math.round(soP*10)/10,val:(stats.shotsOnTotal||0)+(stats.estimated?'*':'')},shotsTotal:{pts:Math.round(stP*10)/10,val:(stats.shotsTotal||0)+(stats.estimated?'*':'')},dangerous:{pts:Math.round(daP*10)/10,val:stats.dangerousTotal||0},xgLive:{pts:Math.round(xgP*10)/10,val:(stats.xgHome!==null&&stats.xgAway!==null)?(stats.xgHome+stats.xgAway).toFixed(2):'n/d'},corners:{pts:Math.round(coP*10)/10,val:(stats.cornersTotal||0)+(stats.estimated?'*':'')},possession:{pts:poP,val:(stats.possessionHome||50)+'%-'+(stats.possessionAway||50)+'%'},gameState:{pts:gsP,val:(match.goals?.home||0)+'-'+(match.goals?.away||0)},overHist:{pts:Math.round(ohP*10)/10,val:Math.round(prior.overHT)+'%'}}};
+    }
+    function generateMomentumAlerts(match, stats, prior, momentum) {
+      var alerts=[],el=match.elapsed||0,tg=(match.goals?.home||0)+(match.goals?.away||0),sc=momentum.score;
+      if(tg===0&&el>=20&&el<=43&&match.status==='1H'&&sc>=65)alerts.push({type:'over05_ht',pick:'Over 0.5 1°T',level:sc>=80?'high':sc>=70?'medium':'low',score:sc,reason:'Momentum '+sc+'/100 — '+(stats.shotsOnTotal||0)+' tiri in porta in '+el+"'"});
+      if(tg>=1&&tg<=1&&el>=25&&el<=43&&match.status==='1H'&&sc>=60)alerts.push({type:'over15_ht',pick:'Over 1.5 1°T',level:sc>=75?'high':sc>=65?'medium':'low',score:sc,reason:'Già '+tg+' gol + momentum '+sc+'/100'});
+      if(tg===0&&el>=50&&el<=78&&match.status==='2H'&&sc>=60)alerts.push({type:'over05_ft',pick:'Over 0.5',level:sc>=75?'high':sc>=65?'medium':'low',score:sc,reason:'0-0 al '+el+"' con "+(stats.shotsOnTotal||0)+' tiri in porta'});
+      if(tg<=1&&el>=55&&el<=82&&match.status==='2H'&&sc>=60&&(stats.shotsTotal||0)>=8)alerts.push({type:'over15_ft',pick:tg===0?'Over 0.5':'Over 1.5',level:sc>=75?'high':sc>=65?'medium':'low',score:sc,reason:(stats.shotsTotal||0)+' tiri totali'});
+      if(tg>=2&&tg<=4&&el>=50&&el<=85&&match.status==='2H'&&sc>=55)alerts.push({type:'over25_ft',pick:'Over '+(tg+0.5>4.5?4.5:tg+0.5),level:sc>=70?'high':sc>=60?'medium':'low',score:sc,reason:'Partita viva ('+(match.goals?.home||0)+'-'+(match.goals?.away||0)+')'});
+      if(match.status==='HT'&&(stats.shotsOnTotal||0)>=3&&sc>=55)alerts.push({type:'goal_2t',pick:tg===0?'Over 0.5 2°T':'Over '+(tg+0.5)+' FT',level:sc>=70?'high':'medium',score:sc,reason:(stats.shotsOnTotal)+' tiri in porta nel 1°T'});
+      var fH=prior.homeWinChance>prior.awayWinChance+15,fA=prior.awayWinChance>prior.homeWinChance+15;
+      if(fH&&(match.goals?.home||0)<(match.goals?.away||0)&&el>=30&&el<=82&&sc>=55)alerts.push({type:'fav_behind',pick:(match.home.name||'').substring(0,15)+' Segna',level:sc>=70?'high':'medium',score:sc,reason:'Favorita ('+prior.homeWinChance+'%) sotto'});
+      if(fA&&(match.goals?.away||0)<(match.goals?.home||0)&&el>=30&&el<=82&&sc>=55)alerts.push({type:'fav_behind',pick:(match.away.name||'').substring(0,15)+' Segna',level:sc>=70?'high':'medium',score:sc,reason:'Favorita ('+prior.awayWinChance+'%) sotto'});
+      return alerts.sort(function(a,b){return b.score-a.score});
+    }
+    function rebuildGlobalAlerts() { var ma=[]; state.liveAnalyzed.forEach(function(d,id){if(d.alerts&&d.alerts.length>0)d.alerts.forEach(function(a){ma.push(Object.assign({},a,{matchId:id,match:d.match,fromMomentum:true}));}); }); var ba=state.liveAlerts.filter(function(a){return!a.fromMomentum;}); state.liveAlerts=ba.concat(ma).sort(function(a,b){return(b.score||0)-(a.score||0);}); }
+    async function analyzeMatchLive(matchId) {
+      var match=state.liveMatches.find(function(m){return m.id===matchId});if(!match)return;
+      if(state.liveAnalyzed.has(matchId)){stopMatchAnalysis(matchId);render();return;}
+      state.liveAnalyzed.set(matchId,{loading:true,match:match});render();
+      try{var r=await Promise.all([callAPIFootball('/fixtures/statistics',{fixture:matchId}),callAPIFootball('/predictions',{fixture:matchId}),callAPIFootball('/fixtures/events',{fixture:matchId}),callAPIFootball('/fixtures',{id:matchId})]);
+      var stats=extractLiveStats(r[0]);
+      if(stats.shotsOnTotal===0&&stats.cornersTotal===0&&stats.possessionHome===50){var fs=r[3]?.response?.[0]?.statistics;if(fs&&fs.length>=2){var il=extractLiveStats({response:fs.map(function(s,i){return{statistics:fs[i]?.statistics||fs[i]}})});if(il.shotsOnTotal>0||il.cornersTotal>0)stats=il;}}
+      if(stats.shotsOnTotal===0&&stats.cornersTotal===0&&stats.possessionHome===50){if(match.stats&&match.stats.length>=2){var ps=extractLiveStatsFromInline(match.stats);if(ps.shotsOnTotal>0||ps.cornersTotal>0)stats=ps;}}
+      if(stats.shotsOnTotal===0&&stats.cornersTotal===0){var es=extractStatsFromEvents(r[2],match);if(es.hasData)stats=Object.assign({},stats,es);}
+      stats.hasLiveData=(stats.shotsOnTotal>0||stats.cornersTotal>0||stats.possessionHome!==50);
+      var prior=extractPreMatchPrior(r[1],match),mom=calculateMomentumScore(match,stats,prior),als=generateMomentumAlerts(match,stats,prior,mom);
+      state.liveAnalyzed.set(matchId,{loading:false,match:match,stats:stats,prior:prior,momentum:mom,alerts:als,lastUpdate:Date.now()});startMatchRefresh(matchId);
+      }catch(e){console.error('Momentum error:',e);state.liveAnalyzed.set(matchId,{loading:false,match:match,stats:{hasLiveData:false},prior:extractPreMatchPrior(null,match),momentum:{score:0,factors:{},rawScore:0,timeMultiplier:'1.00'},alerts:[],lastUpdate:Date.now(),error:true});}
+      rebuildGlobalAlerts();render();setTimeout(function(){var el=document.getElementById('momentum_'+matchId);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},300);
+    }
+    window.analyzeMatchLive=analyzeMatchLive;
+    function startMatchRefresh(matchId) {
+      if(state.liveMatchIntervals.has(matchId))return;
+      var iid=setInterval(async function(){var ex=state.liveAnalyzed.get(matchId);if(!ex||ex.loading)return;if(state.liveEditingMatch===matchId)return;
+      var match=state.liveMatches.find(function(m){return m.id===matchId});if(!match||['FT','AET','PEN'].includes(match.status)){stopMatchAnalysis(matchId);return;}
+      try{if(ex.stats&&ex.stats.manual){var um=calculateMomentumScore(match,ex.stats,ex.prior),ua=generateMomentumAlerts(match,ex.stats,ex.prior,um);state.liveAnalyzed.set(matchId,Object.assign({},ex,{match:match,momentum:um,alerts:ua,lastUpdate:Date.now()}));rebuildGlobalAlerts();render();return;}
+      var r2=await Promise.all([callAPIFootball('/fixtures/statistics',{fixture:matchId}),callAPIFootball('/fixtures/events',{fixture:matchId})]);var stats=extractLiveStats(r2[0]);
+      if(stats.shotsOnTotal===0&&stats.cornersTotal===0&&stats.possessionHome===50){if(match.stats&&match.stats.length>=2){var ps=extractLiveStatsFromInline(match.stats);if(ps.shotsOnTotal>0||ps.cornersTotal>0)stats=ps;}}
+      if(stats.shotsOnTotal===0&&stats.cornersTotal===0){var es=extractStatsFromEvents(r2[1],match);if(es.hasData)stats=Object.assign({},stats,es);}
+      stats.hasLiveData=(stats.shotsOnTotal>0||stats.cornersTotal>0||stats.possessionHome!==50);
+      var mom=calculateMomentumScore(match,stats,ex.prior),als=generateMomentumAlerts(match,stats,ex.prior,mom);state.liveAnalyzed.set(matchId,Object.assign({},ex,{match:match,stats:stats,momentum:mom,alerts:als,lastUpdate:Date.now()}));rebuildGlobalAlerts();render();
+      }catch(e){console.warn('Refresh error:',matchId,e);}},120000);
+      state.liveMatchIntervals.set(matchId,iid);
+    }
+    function stopMatchAnalysis(matchId){var iid=state.liveMatchIntervals.get(matchId);if(iid){clearInterval(iid);state.liveMatchIntervals.delete(matchId);}state.liveAnalyzed.delete(matchId);if(state.liveEditingMatch===matchId)state.liveEditingMatch=null;rebuildGlobalAlerts();}
+    window.stopMatchAnalysis=stopMatchAnalysis;
+    function toggleManualEdit(matchId){var w=state.liveEditingMatch!==null;state.liveEditingMatch=(state.liveEditingMatch===matchId)?null:matchId;if(w&&state.liveEditingMatch===null)state.liveCountdown=60;render();if(state.liveEditingMatch===matchId)setTimeout(function(){var el=document.getElementById('momentum_'+matchId);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},200);}
+    window.toggleManualEdit=toggleManualEdit;
+    function applyManualStats(matchId){var data=state.liveAnalyzed.get(matchId);if(!data)return;var stats=data.stats||{};
+    var gv=function(id){return parseInt(document.getElementById(id)?.value)||0;};var gf=function(id){var v=document.getElementById(id)?.value;return(v!==''&&v!==undefined&&!isNaN(parseFloat(v)))?parseFloat(v):null;};
+    var ms={shotsHome:gv('ms_shots_h_'+matchId),shotsAway:gv('ms_shots_a_'+matchId),shotsOnHome:gv('ms_shotson_h_'+matchId),shotsOnAway:gv('ms_shotson_a_'+matchId),cornersHome:gv('ms_corners_h_'+matchId),cornersAway:gv('ms_corners_a_'+matchId),dangerousHome:gv('ms_danger_h_'+matchId),dangerousAway:gv('ms_danger_a_'+matchId),possessionHome:gv('ms_poss_h_'+matchId)||50,possessionAway:gv('ms_poss_a_'+matchId)||50,xgHome:gf('ms_xg_h_'+matchId),xgAway:gf('ms_xg_a_'+matchId),shotsTotal:0,shotsOnTotal:0,cornersTotal:0,dangerousTotal:0,hasLiveData:true,manual:true,estimated:false};
+    ms.shotsTotal=ms.shotsHome+ms.shotsAway;ms.shotsOnTotal=ms.shotsOnHome+ms.shotsOnAway;ms.cornersTotal=ms.cornersHome+ms.cornersAway;ms.dangerousTotal=ms.dangerousHome+ms.dangerousAway;
+    var mom=calculateMomentumScore(data.match,ms,data.prior),als=generateMomentumAlerts(data.match,ms,data.prior,mom);
+    state.liveAnalyzed.set(matchId,Object.assign({},data,{stats:ms,momentum:mom,alerts:als,lastUpdate:Date.now()}));state.liveEditingMatch=null;state.liveCountdown=60;rebuildGlobalAlerts();render();}
+    window.applyManualStats=applyManualStats;
+    function trackLivePick(matchId,pick,score){var m=state.liveMatches.find(function(x){return x.id===matchId;});var mn=m?(m.home.name+' vs '+m.away.name):'Match '+matchId;var odds=(100/Math.max(50,score)).toFixed(2);trackLiveBet(matchId,mn,pick,score,odds,null);}
+    window.trackLivePick=trackLivePick;
+    function renderSingleMomentumCard(matchId,data){try{var m=data.match,mom=data.momentum,stats=data.stats,alerts=data.alerts||[];var sc=mom.score;var bc=sc>=70?'var(--accent-red)':sc>=55?'var(--accent-yellow)':'var(--accent-cyan)';var bdc=sc>=70?'rgba(239,68,68,0.4)':sc>=55?'rgba(251,191,36,0.3)':'rgba(0,212,255,0.2)';var tsu=Math.round((Date.now()-data.lastUpdate)/1000);var nr=Math.max(0,120-tsu);
+    var html='<div id="momentum_'+matchId+'" style="border:1.5px solid '+bdc+';border-radius:12px;overflow:hidden;background:var(--bg-card);margin-bottom:8px;">';html+='<div style="padding:12px 14px;display:flex;align-items:center;gap:12px;"><div style="font-size:1.6rem;font-weight:900;color:'+bc+';min-width:45px;">'+sc+'</div><div style="flex:1;"><div style="height:5px;background:rgba(255,255,255,0.06);border-radius:3px;"><div style="height:100%;width:'+sc+'%;background:'+bc+';border-radius:3px;"></div></div><div style="font-size:0.58rem;color:var(--text-dark);margin-top:2px;">Momentum Score</div></div><span style="font-size:0.65rem;font-weight:800;color:'+bc+';background:'+bc+'15;padding:3px 8px;border-radius:6px;">'+sc+'/100</span></div>';
+    html+='<div style="padding:0 14px 14px;">';if(!mom.hasRealLiveData)html+='<div style="text-align:center;font-size:0.6rem;color:var(--accent-yellow);padding:5px;background:rgba(251,191,36,0.06);border-radius:6px;margin-bottom:8px;">⚠️ Stats live non disponibili — analisi basata su prior'+(mom.estimated?' + stime':'')+'</div>';
+    html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-bottom:10px;">';var f=mom.factors;if(f){[['🎯 Tiri porta',f.shotsOn],['⚽ Tiri tot.',f.shotsTotal],['🔥 Att. peric.',f.dangerous],['📈 xG live',f.xgLive],['🚩 Corner',f.corners],['📊 Possesso',f.possession],['🎮 Game State',f.gameState],['📉 %Over',f.overHist]].forEach(function(x){html+='<div style="display:flex;justify-content:space-between;padding:2px 5px;font-size:0.55rem;background:rgba(255,255,255,0.02);border-radius:3px;"><span style="color:var(--text-dark);">'+x[0]+'</span><span style="color:var(--text-gray);">'+(x[1]?.val||'')+' <b>+'+(x[1]?.pts||0)+'</b></span></div>';});}html+='</div>';
+    if(alerts.length>0){alerts.forEach(function(a){var ac=a.level==='high'?'var(--accent-red)':a.level==='medium'?'var(--accent-yellow)':'var(--accent-cyan)';var ab=a.level==='high'?'rgba(239,68,68,0.06)':a.level==='medium'?'rgba(251,191,36,0.05)':'rgba(0,212,255,0.04)';html+='<div style="padding:10px;border:1.5px solid '+ac+';border-radius:10px;background:'+ab+';margin-bottom:6px;"><div style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;">CONSIGLIO LIVE</div><div style="font-size:0.95rem;font-weight:900;color:white;margin:3px 0;">'+a.pick+'</div><div style="display:flex;gap:10px;font-size:0.6rem;"><span style="color:var(--accent-cyan);">📈 '+a.score+'/100</span><span style="color:var(--accent-yellow);">💰 ~@'+(100/Math.max(50,a.score)).toFixed(2)+'</span></div><div style="font-size:0.6rem;color:var(--text-gray);margin-top:3px;">💡 '+a.reason+'</div><button onclick="trackLivePick('+m.id+','+JSON.stringify(a.pick).replace(/"/g,'&quot;')+','+a.score+')" style="margin-top:6px;padding:5px 12px;border-radius:6px;font-size:0.65rem;font-weight:700;cursor:pointer;border:1.5px solid var(--accent-cyan);background:rgba(0,212,255,0.08);color:var(--accent-cyan);">🎯 GIOCATO</button></div>';});}else{html+='<div style="text-align:center;padding:8px;color:var(--text-dark);font-size:0.65rem;">📊 Momentum '+sc+'/100 — '+(sc<55?'sotto soglia':'in crescita')+'</div>';}
+    html+='<div style="display:flex;gap:6px;align-items:center;margin-top:8px;"><button onclick="toggleManualEdit('+matchId+')" style="padding:4px 8px;border-radius:6px;font-size:0.6rem;cursor:pointer;border:1px solid var(--border);background:var(--bg-input);color:var(--text-gray);">'+(state.liveEditingMatch===matchId?'✕ Chiudi':'✏️ Stats manuali')+'</button>';if(data.stats&&data.stats.manual)html+='<span style="font-size:0.55rem;background:rgba(251,191,36,0.12);color:#fbbf24;padding:2px 6px;border-radius:4px;font-weight:700;">MANUALE</span>';html+='<span style="flex:1;text-align:right;font-size:0.55rem;color:var(--text-dark);">⟳ ~'+nr+'s</span></div>';
+    if(state.liveEditingMatch===matchId){html+='<div style="margin-top:8px;padding:10px;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid var(--border);"><div style="font-size:0.65rem;font-weight:700;color:var(--accent-cyan);margin-bottom:6px;">✏️ Inserisci stats da bet365</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;">';
+    [['🎯 Tiri porta','ms_shotson',stats.shotsOnHome,stats.shotsOnAway],['⚽ Tiri tot.','ms_shots',stats.shotsHome,stats.shotsAway],['🔥 Att. peric.','ms_danger',stats.dangerousHome,stats.dangerousAway],['🚩 Corner','ms_corners',stats.cornersHome,stats.cornersAway]].forEach(function(x){html+='<div><div style="font-size:0.55rem;color:var(--text-dark);margin-bottom:2px;">'+x[0]+'</div><div style="display:flex;gap:3px;"><input id="'+x[1]+'_h_'+matchId+'" type="number" min="0" max="40" placeholder="H" value="'+(stats.manual?x[2]:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"><span style="color:var(--text-dark);">-</span><input id="'+x[1]+'_a_'+matchId+'" type="number" min="0" max="40" placeholder="A" value="'+(stats.manual?x[3]:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"></div></div>';});
+    html+='</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:8px;"><div><div style="font-size:0.55rem;color:var(--text-dark);margin-bottom:2px;">📊 Possesso %</div><div style="display:flex;gap:3px;"><input id="ms_poss_h_'+matchId+'" type="number" min="0" max="100" placeholder="H%" value="'+(stats.manual?stats.possessionHome:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"><span style="color:var(--text-dark);">-</span><input id="ms_poss_a_'+matchId+'" type="number" min="0" max="100" placeholder="A%" value="'+(stats.manual?stats.possessionAway:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"></div></div><div><div style="font-size:0.55rem;color:var(--text-dark);margin-bottom:2px;">📈 xG live</div><div style="display:flex;gap:3px;"><input id="ms_xg_h_'+matchId+'" type="number" min="0" max="9" step="0.01" placeholder="H" value="'+(stats.manual&&stats.xgHome!==null?stats.xgHome:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"><span style="color:var(--text-dark);">-</span><input id="ms_xg_a_'+matchId+'" type="number" min="0" max="9" step="0.01" placeholder="A" value="'+(stats.manual&&stats.xgAway!==null?stats.xgAway:'')+'" style="flex:1;min-width:32px;max-width:55px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 4px;color:white;font-size:0.8rem;text-align:center;"></div></div></div>';
+    html+='<div style="display:flex;gap:6px;margin-top:8px;"><button onclick="applyManualStats('+matchId+')" style="flex:1;padding:6px;border-radius:6px;font-size:0.7rem;font-weight:700;cursor:pointer;border:none;background:var(--accent-cyan);color:var(--bg-body);">⚡ Ricalcola</button><button onclick="toggleManualEdit('+matchId+')" style="padding:6px 10px;border-radius:6px;font-size:0.7rem;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-gray);">Annulla</button></div></div>';}
+    html+='<button onclick="stopMatchAnalysis('+matchId+');render();" style="width:100%;margin-top:8px;padding:5px;border-radius:6px;font-size:0.6rem;cursor:pointer;border:1px solid rgba(239,68,68,0.2);background:rgba(239,68,68,0.05);color:#f87171;">✕ Ferma analisi</button>';
+    html+='</div></div>';return html;}catch(e){console.warn('renderSingleMomentumCard error:',e);return '';}}
+
     function calculateLiveAlerts() {
       const allAlerts = [];
       const matchPicks = {};
@@ -8627,8 +8595,9 @@ async function analyzeMatch(match) {
       
       // Poi ogni 90 secondi in background
       state.liveBackgroundInterval = setInterval(() => {
+        if (state.liveEditingMatch !== null) return;
         loadLiveMatchesBackground();
-      }, 90000); // 90 secondi in background
+      }, 90000);
     }
     
     async function loadLiveMatchesBackground() {
@@ -8679,6 +8648,11 @@ async function analyzeMatch(match) {
       // Countdown visivo
       state.liveCountdown = 60;
       state.countdownInterval = setInterval(() => {
+        if (state.liveEditingMatch !== null) {
+          const countdownEl = document.querySelector('.live-countdown');
+          if (countdownEl) countdownEl.textContent = '⏸ PAUSA';
+          return;
+        }
         state.liveCountdown--;
         const countdownEl = document.querySelector('.live-countdown');
         if (countdownEl) {
@@ -8691,6 +8665,10 @@ async function analyzeMatch(match) {
       
       // Refresh dati ogni 60 secondi quando nella sezione LIVE
       state.liveInterval = setInterval(() => {
+        if (state.liveEditingMatch !== null) {
+          console.log('⏸ Live refresh bloccato — editing manuale');
+          return;
+        }
         if (state.liveMode) {
           loadLiveMatches();
           state.liveCountdown = 60;
@@ -8763,9 +8741,6 @@ async function analyzeMatch(match) {
         timestamp: new Date().toISOString(),
         status: 'pending', // pending, won, lost
         result: null,
-        // League info per accuracy tracker
-        leagueId: (() => { const m = state.matches.find(x => x.id === matchId); return m?.league?.id || null; })(),
-        leagueName: (() => { const m = state.matches.find(x => x.id === matchId); return m ? (m.league?.country + ' - ' + m.league?.name) : 'Sconosciuto'; })(),
         // NUOVO: Salva features per ML training
         features: extractMLFeatures(matchId)
       };
@@ -9174,55 +9149,6 @@ async function analyzeMatch(match) {
       });
       
       return stats;
-    }
-    
-    // ═══ LEAGUE ACCURACY TRACKER ═══
-    // Calcola hit rate per campionato dai risultati tracciati
-    function getLeagueAccuracyStats() {
-      var leagues = {};
-      state.trackedBets.forEach(function(b) {
-        if (b.status !== 'won' && b.status !== 'lost') return;
-        var name = b.leagueName || 'Sconosciuto';
-        if (!leagues[name]) leagues[name] = { won: 0, lost: 0, total: 0 };
-        leagues[name].total++;
-        if (b.status === 'won') leagues[name].won++;
-        else leagues[name].lost++;
-      });
-      
-      // Converti in array ordinato per accuratezza decrescente
-      return Object.entries(leagues)
-        .map(function(e) {
-          var n = e[0], d = e[1];
-          return { name: n, won: d.won, lost: d.lost, total: d.total, accuracy: ((d.won / d.total) * 100).toFixed(1) };
-        })
-        .filter(function(l) { return l.total >= 2; }) // almeno 2 bet per mostrare
-        .sort(function(a, b) { return parseFloat(b.accuracy) - parseFloat(a.accuracy); });
-    }
-    
-    function renderLeagueAccuracy() {
-      var leagues = getLeagueAccuracyStats();
-      if (leagues.length === 0) return '<div style="font-size:0.65rem;color:var(--text-dark);text-align:center;padding:10px;">Nessun dato sufficiente. Gioca almeno 2 pick per campionato per vedere le statistiche.</div>';
-      
-      var html = '<div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;">';
-      leagues.forEach(function(l) {
-        var accNum = parseFloat(l.accuracy);
-        var color = accNum >= 65 ? '#10b981' : accNum >= 50 ? '#fbbf24' : '#ef4444';
-        var label = accNum >= 65 ? '🟢' : accNum >= 50 ? '🟡' : '🔴';
-        var barW = Math.max(5, Math.min(100, accNum));
-        
-        html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:rgba(255,255,255,0.02);border-radius:6px;">';
-        html += '<span style="font-size:0.7rem;flex-shrink:0;">' + label + '</span>';
-        html += '<div style="flex:1;min-width:0;">';
-        html += '<div style="font-size:0.62rem;color:var(--text-gray);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + l.name + '</div>';
-        html += '<div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:2px;"><div style="height:100%;width:' + barW + '%;background:' + color + ';border-radius:2px;"></div></div>';
-        html += '</div>';
-        html += '<div style="text-align:right;flex-shrink:0;">';
-        html += '<div style="font-size:0.72rem;font-weight:800;color:' + color + ';">' + l.accuracy + '%</div>';
-        html += '<div style="font-size:0.5rem;color:var(--text-dark);">' + l.won + '✅ ' + l.lost + '❌ (' + l.total + ')</div>';
-        html += '</div></div>';
-      });
-      html += '</div>';
-      return html;
     }
     
     function clearOldTrackedBets() {
@@ -10058,11 +9984,6 @@ async function analyzeMatch(match) {
           </div>
           
           <div class="settings-section">
-            <div class="settings-section-title">🏆 Accuratezza per Campionato</div>
-            ${renderLeagueAccuracy()}
-          </div>
-          
-          <div class="settings-section">
             <div class="settings-section-title">&#x1F4CA; Win Rate per Segno</div>
             ${renderWinRateByPick(stats)}
           </div>
@@ -10083,14 +10004,6 @@ async function analyzeMatch(match) {
               <span class="settings-label">Auto-refresh LIVE</span>
               <div class="settings-toggle ${s.autoRefresh ? 'active' : ''}" 
                 onclick="toggleSetting('autoRefresh')"></div>
-            </div>
-            <div class="settings-row">
-              <span class="settings-label">🎯 Context Pressure (fine stagione)</span>
-              <div class="settings-toggle ${s.useContextPressure ? 'active' : ''}" 
-                onclick="toggleSetting('useContextPressure')"></div>
-            </div>
-            <div style="font-size:0.6rem;color:var(--text-dark);padding:4px 0 0 0;line-height:1.4;">
-              💡 Context Pressure modifica gli xG nelle <b>ultime 10 giornate</b> in base a lotta salvezza/Champions/Europa. Default: OFF per mantenere pronostici storici coerenti.
             </div>
           </div>
           
@@ -10354,24 +10267,6 @@ async function analyzeMatch(match) {
     function toggleSetting(key) {
       state.settings[key] = !state.settings[key];
       saveSettings();
-      // Se viene toggled Context Pressure, invalida la cache analisi
-      // in modo che la prossima apertura della partita ricalcoli i valori
-      if (key === 'useContextPressure') {
-        try {
-          analysisCache.clear();
-          state.analysis = null;
-          state.oddsLab = null;
-          state.valueBets = null;
-          state.regressionScore = null;
-          state.consensus = null;
-          console.log('🔄 Cache analisi svuotata — Context Pressure toggle');
-          // Se siamo in una partita, rianalizza subito
-          if (state.view === 'analysis' && state.selectedMatch) {
-            analyzeMatch(state.selectedMatch);
-            return;
-          }
-        } catch(e) { console.warn('Cache clear error:', e); }
-      }
       render();
     }
     
@@ -11523,13 +11418,17 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       
       return `
         <div class="date-tabs">
+          <div class="date-tab live-tab ${state.liveMode ? 'active' : ''}" id="liveTab" onclick="toggleLiveMode()">
+            <span class="live-dot"></span> LIVE ${state.liveAlerts.length > 0 ? '<span class="live-badge-count">' + state.liveAlerts.length + '</span>' : ''}
+          </div>
           ${[-1, 0, 1, 2].map(d => `
-            <div class="date-tab ${state.selectedDate === d ? 'active' : ''}" data-date="${d}">
+            <div class="date-tab ${!state.liveMode && state.selectedDate === d ? 'active' : ''}" data-date="${d}">
               ${getDateLabel(d)} ${d !== 0 ? `(${formatDate(getDateString(d))})` : ''}
             </div>
           `).join('')}
         </div>
         
+        ${state.liveMode ? renderLiveSection() : `
         <!-- CAMPIONATI CON FILTRI -->
         <div class="panel" style="margin-bottom: 16px;">
           <div class="panel-title">📋 Campionati (${state.matches.length} partite)</div>
@@ -11622,6 +11521,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         <!-- QUICK FIND BUTTONS -->
         ${renderQuickFind(picks)}
         
+      `}
       `;
     }
     
@@ -11870,7 +11770,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       }
       
       const matches = state.liveMatches;
-      const picks = state.liveMatchPicks || {};
       const alerts = state.liveAlerts;
       
       if (matches.length === 0) {
@@ -11910,93 +11809,28 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         // Per ogni partita
         league.matches.forEach(m => {
-          const mPicks = (picks[m.id] || []).filter(p => p.verdict !== 'VINTO');
-          const topPicks = mPicks; // all picks, grouped by category below
           const hg = m.goals?.home || 0;
           const ag = m.goals?.away || 0;
           const statusText = m.status === 'HT' ? 'INT' : m.status === '1H' || m.status === '2H' ? m.elapsed + '\'' : m.status;
           
-          html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;">';
-          
-          // Riga partita: squadre + score + minuto
-          html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;cursor:pointer;" onclick="{ const mx=state.matches.find(x=>x.id===' + m.id + '); if(mx)analyzeMatch(mx); else alert(\'Apri questa partita dalla lista campionati per analisi completa\'); }">';
-          html += '<div style="flex:1;min-width:0;">';
-          html += '<div style="font-size:0.82rem;font-weight:700;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(m.home.name) + ' vs ' + esc(m.away.name) + '</div>';
-          html += '</div>';
-          html += '<div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">';
+          html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:6px;">';
+          html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">';
+          html += '<div style="flex:1;min-width:0;"><div style="font-size:0.82rem;font-weight:700;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(m.home.name) + ' vs ' + esc(m.away.name) + '</div></div>';
+          html += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">';
           html += '<div style="font-size:1.4rem;font-weight:900;color:white;letter-spacing:2px;">' + hg + ' - ' + ag + '</div>';
           html += '<div style="background:rgba(239,68,68,0.15);color:#f87171;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:6px;animation:pulse 1.5s infinite;">' + statusText + '</div>';
-          html += '</div></div>';
+          html += `<button onclick="event.stopPropagation();analyzeMatchLive(${m.id})" style="padding:3px 8px;border-radius:6px;font-size:0.6rem;font-weight:700;cursor:pointer;border:1.5px solid ${state.liveAnalyzed.has(m.id)?'rgba(239,68,68,0.3)':'rgba(0,212,255,0.3)'};background:${state.liveAnalyzed.has(m.id)?'rgba(239,68,68,0.08)':'rgba(0,212,255,0.08)'};color:${state.liveAnalyzed.has(m.id)?'#f87171':'#00d4ff'};">${state.liveAnalyzed.has(m.id)?'✕ Stop':'⚡ Analizza'}</button>`;
+          html += '</div></div></div>';
           
-          // Stats compatte (se disponibili)
-          const st = m.stats && m.stats.length >= 2;
-          if (st) {
-            const hs = m.stats[0]?.statistics || [];
-            const as = m.stats[1]?.statistics || [];
-            const g = (arr, t) => { const s = arr.find(x => x.type === t); return s ? (parseInt(s.value) || 0) : 0; };
-            const sOnH = g(hs, 'Shots on Goal'), sOnA = g(as, 'Shots on Goal');
-            const cH = g(hs, 'Corner Kicks'), cA = g(as, 'Corner Kicks');
-            const pH = g(hs, 'Ball Possession') || 50, pA = g(as, 'Ball Possession') || 50;
-            html += '<div style="display:flex;gap:10px;font-size:0.65rem;color:var(--text-dark);margin-bottom:10px;flex-wrap:wrap;">';
-            html += '<span>🎯 Tiri: <strong style="color:var(--text-gray);">' + sOnH + '-' + sOnA + '</strong></span>';
-            html += '<span>🚩 Corner: <strong style="color:var(--text-gray);">' + cH + '-' + cA + '</strong></span>';
-            html += '<span>📊 Poss: <strong style="color:var(--text-gray);">' + pH + '%-' + pA + '%</strong></span>';
-            html += '</div>';
+          // Momentum inline
+          if (state.liveAnalyzed.has(m.id)) {
+            const mData = state.liveAnalyzed.get(m.id);
+            if (mData && !mData.loading && mData.momentum) {
+              html += renderSingleMomentumCard(m.id, mData);
+            } else if (mData && mData.loading) {
+              html += '<div id="momentum_' + m.id + '" style="padding:14px;text-align:center;background:var(--bg-card);border:1.5px solid rgba(0,212,255,0.2);border-radius:12px;margin-bottom:8px;"><div class="spinner" style="margin:0 auto;"></div><div style="font-size:0.72rem;color:var(--text-dark);margin-top:8px;">⏳ Analisi momentum in corso...</div></div>';
+            }
           }
-          
-          // Top picks per questa partita - priorità: 1T/2T over/under, poi total, poi gg, poi esito
-          if (topPicks.length > 0) {
-            // Raggruppa per categoria
-            const cats = { '1T': [], '2T': [], 'total': [], 'gg': [], 'esito': [], 'altro': [] };
-            mPicks.forEach(p => { if (cats[p.cat]) cats[p.cat].push(p); else cats.altro.push(p); });
-            
-            // Mostra sezioni con picks
-            const sections = [
-              { key: '1T', label: '1° Tempo', icon: '🕐' },
-              { key: '2T', label: '2° Tempo', icon: '🕑' },
-              { key: 'total', label: 'Over/Under', icon: '📊' },
-              { key: 'gg', label: 'GG/NG', icon: '⚡' },
-              { key: 'esito', label: 'Esito', icon: '🏆' }
-            ].filter(s => cats[s.key] && cats[s.key].length > 0);
-            
-            html += '<div style="display:flex;flex-direction:column;gap:4px;">';
-            sections.forEach(sec => {
-              const secPicks = cats[sec.key].slice(0, 2);
-              html += '<div style="font-size:0.58rem;color:var(--text-dark);font-weight:700;padding:4px 2px 1px;margin-top:2px;">' + sec.icon + ' ' + sec.label + '</div>';
-              secPicks.forEach((p, i) => {
-              const isGioca = p.verdict === 'GIOCA';
-              const isValuta = p.verdict === 'VALUTA';
-              const bgColor = isGioca ? 'rgba(16,185,129,0.08)' : isValuta ? 'rgba(251,191,36,0.06)' : 'rgba(100,116,139,0.06)';
-              const borderColor = isGioca ? 'rgba(16,185,129,0.25)' : isValuta ? 'rgba(251,191,36,0.2)' : 'rgba(100,116,139,0.15)';
-              const verdictColor = isGioca ? '#10b981' : isValuta ? '#fbbf24' : '#64748b';
-              const verdictIcon = isGioca ? '✅' : isValuta ? '⚠️' : '⛔';
-              
-              html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;background:' + bgColor + ';border:1px solid ' + borderColor + ';">';
-              
-              // Sinistra: pick + reason
-              html += '<div style="flex:1;min-width:0;">';
-              html += '<div style="font-size:0.78rem;font-weight:700;color:white;">' + p.icon + ' ' + p.market + '</div>';
-              html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(p.reason) + '</div>';
-              html += '</div>';
-              
-              // Destra: prob + verdetto + quota
-              html += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">';
-              html += '<div style="text-align:right;">';
-              html += '<div style="font-size:1rem;font-weight:900;color:' + (p.prob >= 72 ? '#10b981' : p.prob >= 55 ? '#00d4ff' : '#fbbf24') + ';">' + p.prob + '%</div>';
-              html += '<div style="font-size:0.55rem;color:var(--text-dark);">@' + p.quota + '</div>';
-              html += '</div>';
-              html += '<div style="background:' + verdictColor + '15;border:1px solid ' + verdictColor + '40;border-radius:6px;padding:3px 8px;font-size:0.62rem;font-weight:800;color:' + verdictColor + ';white-space:nowrap;">' + verdictIcon + ' ' + p.verdict + '</div>';
-              html += '</div>';
-              
-              html += '</div>';
-            });
-            });
-            html += '</div>';
-          } else {
-            html += '<div style="font-size:0.68rem;color:var(--text-dark);text-align:center;padding:6px;">⏳ In attesa di dati sufficienti...</div>';
-          }
-          
-          html += '</div>'; // fine card partita
         });
         
         html += '</div>'; // fine gruppo campionato
@@ -12104,6 +11938,14 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               })()}
               ${d.homeFatigue && d.homeFatigue < 0.95 ? `<span style="font-size:0.6rem;background:rgba(248,113,113,0.15);color:#f87171;padding:2px 7px;border-radius:4px;">⚡ ${m.home.name.split(' ')[0]} stanco</span>` : ''}
               ${d.awayFatigue && d.awayFatigue < 0.95 ? `<span style="font-size:0.6rem;background:rgba(248,113,113,0.15);color:#f87171;padding:2px 7px;border-radius:4px;">⚡ ${m.away.name.split(' ')[0]} stanco</span>` : ''}
+              ${(() => {
+                // STAKE ADVISOR BADGE — compatto, sostituisce la sezione completa
+                try {
+                  const trapScore = (typeof calculateTrapScore === 'function') ? calculateTrapScore(m, d).score : null;
+                  const ai = generateAIAdvice(m, d);
+                  return renderStakeAdvisorBadge(state.consensus, state.regressionScore, trapScore, ai?.confidence);
+                } catch(e) { return ''; }
+              })()}
             </div>
           </div>
         </div>
@@ -12112,7 +11954,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         <div class="analysis-hero">
           <div class="hero-league">${esc(m.league.country)} • ${esc(m.league.name)} • ${formatDateFull(m.date)} ${formatTime(m.date)}</div>
-          <div class="hero-match" style="position:relative;">
+          <div class="hero-match">
             <div class="hero-team">
               ${m.home.logo ? `<img src="${m.home.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.home.name)}</div>`}
               <div class="hero-team-name">${esc(m.home.name)}</div>
@@ -12125,16 +11967,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             <div class="hero-team">
               ${m.away.logo ? `<img src="${m.away.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.away.name)}</div>`}
               <div class="hero-team-name">${esc(m.away.name)}</div>
-            </div>
-            <!-- Stake Indicator (pallino colorato) -->
-            <div style="position:absolute;top:-4px;right:-4px;">
-              ${(() => {
-                try {
-                  const trapS = typeof calculateTrapScore === 'function' ? calculateTrapScore(m, d).score : null;
-                  const aiAdv = generateAIAdvice(m, d);
-                  return renderStakeIndicator(state.consensus, state.regressionScore, trapS, aiAdv?.confidence);
-                } catch(e) { return ''; }
-              })()}
             </div>
           </div>
           
@@ -12388,27 +12220,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         </div>
       </div>
 
-      <!-- === CONTEXT PRESSURE DETECTOR === -->
-      <div class="section-accordion">
-        <div class="section-accordion-header" onclick="toggleAccordion(this)">
-          <div class="section-accordion-title"><span>🎯</span> Context Pressure</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            ${(() => {
-              try {
-                const cp = d.contextPressure;
-                if (!cp) return '<span style="font-size:0.6rem;color:var(--text-dark);">N/D</span>';
-                const enabled = state.settings.useContextPressure;
-                const badge = enabled && cp.enabled ? '✅ ATTIVO' : !enabled ? '🔒 OFF' : '⚪ N/A';
-                return '<span style="font-size:0.6rem;background:' + cp.color + '18;color:' + cp.color + ';padding:2px 8px;border-radius:8px;font-weight:700;">' + cp.icon + ' ' + badge + '</span>';
-              } catch(e) { return ''; }
-            })()}
-            <span class="section-accordion-arrow">▼</span>
-          </div>
-        </div>
-        <div class="section-accordion-body">
-          ${safeRender(() => renderContextPressure(m, d), '', 'ContextPressure')}
-        </div>
-      </div>
+      <!-- === STAKE ADVISOR rimosso: ora è un badge compatto in alto (vedi badges row analysis-actions) === -->
 
       <!-- === v7: ODDS LAB === -->
       <div class="section-accordion">
@@ -12416,8 +12228,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>💰</span> Odds Lab — Multi-Bookmaker</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (state.oddsLab === null) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
-              if (state.oddsLab === false) return '<span style="font-size:0.6rem;color:#f87171;">N/D</span>';
+              if (!state.oddsLab) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
               const steamCount = state.oddsLab.steamMoves.filter(s => s.type === 'bullish').length;
               return '<span style="font-size:0.6rem;background:rgba(245,158,11,0.12);color:#f59e0b;padding:2px 8px;border-radius:8px;font-weight:700;">' + state.oddsLab.bookmakers.length + ' book' + (steamCount > 0 ? ' • 🔥' + steamCount + ' steam' : '') + '</span>';
             })()}
@@ -12425,7 +12236,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.oddsLab && state.oddsLab !== false ? safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab') : state.oddsLab === false ? '<div style="padding:14px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Quote non disponibili per questa partita. Riprova tra qualche minuto.</div>' : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'}
+          ${state.oddsLab ? safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'}
         </div>
       </div>
       
@@ -12435,8 +12246,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>🎯</span> Value Bet Engine + Kelly</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (state.valueBets === null) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
-              if (state.valueBets === false) return '<span style="font-size:0.6rem;color:#f87171;">N/D</span>';
+              if (!state.valueBets) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
               const count = state.valueBets.totalValueBets;
               return count > 0 
                 ? '<span style="font-size:0.6rem;background:rgba(0,229,160,0.15);color:#00e5a0;padding:2px 8px;border-radius:8px;font-weight:800;">🎯 ' + count + ' VALUE</span>'
@@ -12446,7 +12256,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.valueBets && state.valueBets !== false ? safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets') : state.valueBets === false ? '<div style="padding:14px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Value Bets non calcolabili — quote non disponibili.</div>' : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'}
+          ${state.valueBets ? safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'}
         </div>
       </div>
 
