@@ -6347,9 +6347,10 @@ async function analyzeMatch(match) {
       }
       
       // === FATTORE 7: Quote troppo basse ===
-      const bkHome = bk.home ? parseFloat(bk.home) : 0;
-      const bkAway = bk.away ? parseFloat(bk.away) : 0;
-      const favOdds = favIs === 'home' ? bkHome : bkAway;
+      // FIX: bk.home è la PROBABILITÀ (0-100), le quote vere sono in bk.homeOdd / bk.awayOdd
+      const bkHomeOdd = (bk.homeOdd && bk.homeOdd > 1) ? parseFloat(bk.homeOdd) : 0;
+      const bkAwayOdd = (bk.awayOdd && bk.awayOdd > 1) ? parseFloat(bk.awayOdd) : 0;
+      const favOdds = favIs === 'home' ? bkHomeOdd : bkAwayOdd;
       if (favOdds > 0 && favOdds <= 1.30) {
         var w = 16;
         totalScore += w;
@@ -6974,10 +6975,13 @@ async function analyzeMatch(match) {
         if (oddsLab && oddsLab.steamMoves.length > 0) {
           const favSteam = oddsLab.steamMoves.find(s => s.direction === favIs && s.type === 'bullish');
           const undSteam = oddsLab.steamMoves.find(s => s.direction !== favIs && s.type === 'bullish');
-          if (favSteam) score = 80 + parseFloat(favSteam.delta);
+          if (favSteam) {
+            const delta = parseFloat(favSteam.delta);
+            score = isNaN(delta) ? 80 : (80 + delta);
+          }
           else if (undSteam) score = 20;
         }
-        score = clamp(0, score, 100);
+        score = clamp(0, isNaN(score) ? 50 : score, 100);
         factors.push({ name: '🔥 Smart Money', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
         totalScore += score * w;
         totalWeight += w;
@@ -8758,10 +8762,11 @@ async function analyzeMatch(match) {
     function trackPrematchBet(matchId, matchName, pick, prob, event) {
       if (event) event.stopPropagation();
       
-      // Stima quota basata sulla probabilità
-      const odds = (100 / prob).toFixed(2);
+      // Guard: se prob non è valida, fallback a 50% per evitare odds=Infinity
+      const safeProb = (typeof prob === 'number' && prob > 0 && isFinite(prob)) ? prob : 50;
+      const odds = (100 / safeProb).toFixed(2);
       
-      const bet = trackBet('prematch', matchId, matchName, pick, prob, odds, false);
+      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false);
       if (bet) {
         alert(`✅ Pronostico tracciato!\n\n${matchName}\n${pick} @ ${odds}\n\nVerrà verificato automaticamente a fine partita.`);
       } else {
@@ -8783,8 +8788,9 @@ async function analyzeMatch(match) {
     // Funzione per tracciare pronostici dalla HOME (Consiglio AI cards)
     function trackFromHome(matchId, matchName, pick, prob, event) {
       if (event) event.stopPropagation();
-      const odds = (100 / prob).toFixed(2);
-      const bet = trackBet('prematch', matchId, matchName, pick, prob, odds, false);
+      const safeProb = (typeof prob === 'number' && prob > 0 && isFinite(prob)) ? prob : 50;
+      const odds = (100 / safeProb).toFixed(2);
+      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false);
       if (bet) {
         render();
       } else {
@@ -9171,6 +9177,8 @@ async function analyzeMatch(match) {
       
       console.log(`&#x1F50D; Verifica automatica di ${pending.length} pronostici pendenti...`);
       let updatedCount = 0;
+      let abandonedCount = 0;
+      const ABANDON_DAYS = 14; // pronostici di > 14 giorni considerati abbandonati
       
       for (const bet of pending) {
         try {
@@ -9178,6 +9186,16 @@ async function analyzeMatch(match) {
           const betDate = new Date(bet.timestamp);
           const now = new Date();
           const minutesSince = (now - betDate) / (1000 * 60);
+          const daysSince = minutesSince / (60 * 24);
+          
+          // OTTIMIZZAZIONE: skip pronostici troppo vecchi (>14 giorni) per non sprecare rate-limit API
+          // Vengono marcati come "abbandonati" anziché continuare a verificarli all'infinito
+          if (daysSince > ABANDON_DAYS) {
+            bet.status = 'abandoned';
+            bet.verified = new Date().toISOString();
+            abandonedCount++;
+            continue;
+          }
           
           console.log(`⏳ Verifica bet: ${bet.matchName} (${(minutesSince/60).toFixed(1)}h fa)`);
           
@@ -9258,13 +9276,17 @@ async function analyzeMatch(match) {
       }
       
       // Salva solo se ci sono stati aggiornamenti
-      if (updatedCount > 0) {
+      if (updatedCount > 0 || abandonedCount > 0) {
         saveTrackedBets();
-        saveMLThresholds();
-        updatePerformanceHistory();
-        updateMLFromResults();
-        
-        console.log(`&#x1F4CA; Aggiornati ${updatedCount} pronostici`);
+        if (updatedCount > 0) {
+          saveMLThresholds();
+          updatePerformanceHistory();
+          updateMLFromResults();
+          console.log(`&#x1F4CA; Aggiornati ${updatedCount} pronostici`);
+        }
+        if (abandonedCount > 0) {
+          console.log(`🗃️ Marcati come abbandonati ${abandonedCount} pronostici (>14 giorni senza verifica)`);
+        }
       }
       
       // Aggiorna interfaccia
