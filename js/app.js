@@ -839,9 +839,12 @@
             if (a.lastUpdate !== b.lastUpdate) return a.lastUpdate - b.lastUpdate;
             return a.date.localeCompare(b.date);
           });
-          const toRemove = allEntries.slice(0, allEntries.length - MAX_MATCHES_TOTAL);
+          // FIX: rimuovi al SOFT_LIMIT (550) anziché al limite massimo (600)
+          // Così non si attiva il cleanup ad ogni save quando si oscilla intorno al limite
+          const SOFT_LIMIT = MAX_MATCHES_TOTAL - 50;
+          const toRemove = allEntries.slice(0, allEntries.length - SOFT_LIMIT);
           toRemove.forEach(e => delete state.predictionHistory[e.key]);
-          console.log('🗑️ Storico: limite ' + MAX_MATCHES_TOTAL + ' raggiunto, rimosse ' + toRemove.length + ' partite meno attive');
+          console.log('🗑️ Storico: limite ' + MAX_MATCHES_TOTAL + ' raggiunto, ridotto a ' + SOFT_LIMIT + ' (rimosse ' + toRemove.length + ' meno attive)');
         }
 
         if (removedAge > 0) {
@@ -3180,10 +3183,70 @@
         goalsFor: team.all.goals.for,
         goalsAgainst: team.all.goals.against,
         goalDiff: team.goalsDiff,
+        // === NUOVO: split CASA / TRASFERTA per dettaglio Squadre & Contesto ===
+        home: team.home ? {
+          played: team.home.played,
+          won: team.home.win,
+          draw: team.home.draw,
+          lost: team.home.lose,
+          goalsFor: team.home.goals.for,
+          goalsAgainst: team.home.goals.against
+        } : null,
+        away: team.away ? {
+          played: team.away.played,
+          won: team.away.win,
+          draw: team.away.draw,
+          lost: team.away.lose,
+          goalsFor: team.away.goals.for,
+          goalsAgainst: team.away.goals.against
+        } : null,
         motivation,
         motivationText,
         motivationColor
       };
+    }
+
+    // === MINI-CLASSIFICA: estrae 8 righe centrate sulle 2 squadre del match ===
+    // Mostra 3 sopra, le 2 squadre evidenziate, 3 sotto (massimo 8 righe)
+    function getMiniStandings(standings, homeTeamId, awayTeamId) {
+      if (!standings || standings.length === 0) return null;
+
+      const homeIdx = standings.findIndex(s => s.team.id === homeTeamId);
+      const awayIdx = standings.findIndex(s => s.team.id === awayTeamId);
+      if (homeIdx < 0 && awayIdx < 0) return null;
+
+      // Range che include entrambe le squadre + contesto
+      const minIdx = Math.min(homeIdx >= 0 ? homeIdx : standings.length, awayIdx >= 0 ? awayIdx : standings.length);
+      const maxIdx = Math.max(homeIdx, awayIdx);
+
+      // Vogliamo mostrare ~8 righe totali, centrate sul range
+      const desired = 8;
+      const range = maxIdx - minIdx + 1;
+      const padding = Math.max(0, Math.floor((desired - range) / 2));
+      let start = Math.max(0, minIdx - padding);
+      let end = Math.min(standings.length, maxIdx + padding + 1);
+
+      // Se siamo a fine classifica, espandi verso l'inizio (e viceversa)
+      while (end - start < desired && (start > 0 || end < standings.length)) {
+        if (start > 0) start--;
+        else if (end < standings.length) end++;
+        else break;
+      }
+
+      return standings.slice(start, end).map(t => ({
+        rank: t.rank,
+        teamId: t.team.id,
+        teamName: t.team.name,
+        teamLogo: t.team.logo,
+        played: t.all.played,
+        won: t.all.win,
+        draw: t.all.draw,
+        lost: t.all.lose,
+        goalDiff: t.goalsDiff,
+        points: t.points,
+        isHome: t.team.id === homeTeamId,
+        isAway: t.team.id === awayTeamId
+      }));
     }
     
     // === INFORTUNATI ===
@@ -4175,13 +4238,15 @@ async function analyzeMatch(match) {
       // NUOVO: Calcola posizione e motivazione
       const homePosition = getTeamPosition(standings, match.home.id);
       const awayPosition = getTeamPosition(standings, match.away.id);
+      // NUOVO: mini-classifica con 8 righe centrate sulle 2 squadre
+      const miniStandings = getMiniStandings(standings, match.home.id, match.away.id);
       
       // NUOVO: Calcola impatto infortunati
       const homeInjuryImpact = calculateInjuryImpact(homeInjuries);
       const awayInjuryImpact = calculateInjuryImpact(awayInjuries);
       
       const rawAnalysis = buildAnalysis(match, homeStats, awayStats, h2h, apiPred, fsMatch, homeForm, awayForm, {
-        homePosition, awayPosition, homeInjuries, awayInjuries, homeInjuryImpact, awayInjuryImpact,
+        homePosition, awayPosition, miniStandings, homeInjuries, awayInjuries, homeInjuryImpact, awayInjuryImpact,
         homeLineup, awayLineup, lineupsAvailable,
         bookmakerOdds,
         homeFatigue, awayFatigue
@@ -4282,7 +4347,7 @@ async function analyzeMatch(match) {
       const awayData = extractTeamData(awayStats, 'away');
       
       const {
-        homePosition, awayPosition, homeInjuries, awayInjuries, homeInjuryImpact, awayInjuryImpact,
+        homePosition, awayPosition, miniStandings, homeInjuries, awayInjuries, homeInjuryImpact, awayInjuryImpact,
         homeLineup, awayLineup, lineupsAvailable,
         bookmakerOdds,
         homeFatigue, awayFatigue
@@ -4460,6 +4525,7 @@ async function analyzeMatch(match) {
         // NUOVO: Classifica e Infortunati
         homePosition,
         awayPosition,
+        miniStandings: miniStandings || null,
         homeInjuries: homeInjuries || [],
         awayInjuries: awayInjuries || [],
         quality: (homeStats || awayStats) ? 'enhanced' : 'base',
@@ -4827,6 +4893,12 @@ async function analyzeMatch(match) {
       const over05_2T = calcMultigol(homeXG_2T, awayXG_2T, 1, 6);
       const over15_2T = calcMultigol(homeXG_2T, awayXG_2T, 2, 6);
       
+      // === FIX: Probabilità 1X2 per ogni tempo (riparava il signal Super Algorithm) ===
+      // Prima `primoTempo.casa` non esisteva → temporale_casa sempre undefined nel voto "1 Casa"
+      // Ora calcoliamo le prob di vittoria in ciascun tempo usando xG dimezzati
+      const p1X2_1T = calc1X2(homeXG_1T, awayXG_1T);
+      const p1X2_2T = calc1X2(homeXG_2T, awayXG_2T);
+      
       // Tempo con più gol
       const piuGol1T = totXG_1T > totXG_2T;
       const probPiuGol = piuGol1T ? 
@@ -4837,12 +4909,18 @@ async function analyzeMatch(match) {
         primoTempo: {
           xG: totXG_1T,
           over05: over05_1T,
-          over15: over15_1T
+          over15: over15_1T,
+          casa: p1X2_1T.home,
+          pareggio: p1X2_1T.draw,
+          ospite: p1X2_1T.away
         },
         secondoTempo: {
           xG: totXG_2T,
           over05: over05_2T,
-          over15: over15_2T
+          over15: over15_2T,
+          casa: p1X2_2T.home,
+          pareggio: p1X2_2T.draw,
+          ospite: p1X2_2T.away
         },
         tempoConPiuGol: piuGol1T ? '1° Tempo' : '2° Tempo',
         probTempoConPiuGol: probPiuGol
@@ -5381,6 +5459,7 @@ async function analyzeMatch(match) {
           h2h_ospite:       h2hAwayWins > h2hHomeWins,
           win_rate_ok:      aWR >= 40,
           casa_FTS_alto:    hFTS >= 25,
+          temporale_ospite: temporalDistribution ? temporalDistribution.primoTempo.ospite >= 30 : p1X2.away >= 42,
           algo_alta_conf:   p1X2.away >= 55,
           ospite_GF_alto:   aGF >= 1.4,
         }
@@ -8071,7 +8150,6 @@ async function analyzeMatch(match) {
       const pBTTS = d.pBTTS || 50;
       const ngProb = 100 - pBTTS;
       const pOU = d.pOU || {};
-      const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
       const oddsLab = state.oddsLab;
       let avgGG = 0, avgNG = 0, ggCount = 0;
       let avgOver = 0, avgUnder = 0, ouCount = 0;
@@ -8089,87 +8167,156 @@ async function analyzeMatch(match) {
         var tot = 1/odd1 + 1/odd2;
         return { p1: (1/odd1/tot)*100, p2: (1/odd2/tot)*100, margin: ((tot-1)*100).toFixed(1) };
       }
+
+      // === Costruzione mercati con verdetti ===
       var markets = [];
-      var ggImpl = impliedProbs(avgGG, avgNG);
-      if (ggImpl) {
-        var ggDelta = pBTTS - ggImpl.p1, ngDelta = ngProb - ggImpl.p2;
-        var bestPick1, bestDelta1, bestColor1, bestIcon1, verdict1;
-        if (Math.abs(ggDelta) >= Math.abs(ngDelta)) { bestPick1 = 'GG'; bestDelta1 = ggDelta; } else { bestPick1 = 'NG'; bestDelta1 = ngDelta; }
-        if (bestDelta1 > 15) { bestColor1 = '#10b981'; bestIcon1 = '🟢'; verdict1 = 'VALUE FORTE'; }
-        else if (bestDelta1 > 5) { bestColor1 = '#22c55e'; bestIcon1 = '🟢'; verdict1 = 'VALUE'; }
-        else if (bestDelta1 > -5) { bestColor1 = '#94a3b8'; bestIcon1 = '⚪'; verdict1 = 'ALLINEATI'; }
-        else if (bestDelta1 > -15) { bestColor1 = '#f59e0b'; bestIcon1 = '🟡'; verdict1 = 'ATTENZIONE'; }
-        else { bestColor1 = '#ef4444'; bestIcon1 = '🔴'; verdict1 = 'TRAPPOLA'; }
-        var modelPick1 = pBTTS >= 50 ? 'GG' : 'NG', bookPick1 = ggImpl.p1 >= 50 ? 'GG' : 'NG';
-        var divergence1 = modelPick1 !== bookPick1;
-        if (divergence1) { bestColor1 = '#eab308'; bestIcon1 = '🟡'; }
-        markets.push({ title: 'GG / NG', icon: '⚽', picks: [
-          { label: 'GG', quota: avgGG, modelP: pBTTS, bookP: ggImpl.p1, delta: ggDelta, sharpQuota: sharpGG },
-          { label: 'NG', quota: avgNG, modelP: ngProb, bookP: ggImpl.p2, delta: ngDelta, sharpQuota: sharpNG }
-        ], margin: ggImpl.margin, bestPick: bestPick1, bestDelta: bestDelta1, bestColor: bestColor1, bestIcon: bestIcon1, verdict: verdict1, divergence: divergence1, modelPick: modelPick1, bookPick: bookPick1 });
-      }
-      // FIX: pOU è indicizzato come pOU[1.5], pOU[2.5], pOU[3.5] - NON pOU.over25
       var overP = (pOU && pOU[2.5] && typeof pOU[2.5].over === 'number') ? pOU[2.5].over : 50;
       var underP = 100 - overP;
+
+      function buildVerdict(modelP1, modelP2, bookP1, bookP2, label1, label2) {
+        var d1 = modelP1 - bookP1, d2 = modelP2 - bookP2;
+        var bestPick, bestDelta;
+        if (Math.abs(d1) >= Math.abs(d2)) { bestPick = label1; bestDelta = d1; }
+        else { bestPick = label2; bestDelta = d2; }
+        var color, icon, verdict;
+        if (bestDelta > 15) { color = '#10b981'; icon = '🟢'; verdict = 'VALUE FORTE'; }
+        else if (bestDelta > 5) { color = '#22c55e'; icon = '🟢'; verdict = 'VALUE'; }
+        else if (bestDelta > -5) { color = '#94a3b8'; icon = '⚪'; verdict = 'ALLINEATI'; }
+        else if (bestDelta > -15) { color = '#f59e0b'; icon = '🟡'; verdict = 'ATTENZIONE'; }
+        else { color = '#ef4444'; icon = '🔴'; verdict = 'TRAPPOLA'; }
+        var modelPick = modelP1 >= 50 ? label1 : label2;
+        var bookPick = bookP1 >= 50 ? label1 : label2;
+        var divergence = modelPick !== bookPick;
+        if (divergence) { color = '#eab308'; icon = '🟡'; }
+        return { bestPick: bestPick, bestDelta: bestDelta, color: color, icon: icon, verdict: verdict, divergence: divergence, modelPick: modelPick, bookPick: bookPick };
+      }
+
+      var ggImpl = impliedProbs(avgGG, avgNG);
+      if (ggImpl) {
+        var v = buildVerdict(pBTTS, ngProb, ggImpl.p1, ggImpl.p2, 'GG', 'NG');
+        markets.push({
+          title: 'GG / NG', icon: '⚽',
+          quotaLabel1: 'Quota GG', quotaLabel2: 'Quota NG',
+          quota1: avgGG, quota2: avgNG,
+          sharpQuota1: sharpGG, sharpQuota2: sharpNG,
+          modelP1: pBTTS, modelP2: ngProb,
+          bookP1: ggImpl.p1, bookP2: ggImpl.p2,
+          delta1: pBTTS - ggImpl.p1, delta2: ngProb - ggImpl.p2,
+          label1: 'GG', label2: 'NG',
+          margin: ggImpl.margin,
+          ...v
+        });
+      }
+
       var ouImpl = impliedProbs(avgOver, avgUnder);
       if (ouImpl) {
-        var overDelta = overP - ouImpl.p1, underDelta = underP - ouImpl.p2;
-        var bestPick2, bestDelta2, bestColor2, bestIcon2, verdict2;
-        if (Math.abs(overDelta) >= Math.abs(underDelta)) { bestPick2 = 'Over 2.5'; bestDelta2 = overDelta; } else { bestPick2 = 'Under 2.5'; bestDelta2 = underDelta; }
-        if (bestDelta2 > 15) { bestColor2 = '#10b981'; bestIcon2 = '🟢'; verdict2 = 'VALUE FORTE'; }
-        else if (bestDelta2 > 5) { bestColor2 = '#22c55e'; bestIcon2 = '🟢'; verdict2 = 'VALUE'; }
-        else if (bestDelta2 > -5) { bestColor2 = '#94a3b8'; bestIcon2 = '⚪'; verdict2 = 'ALLINEATI'; }
-        else if (bestDelta2 > -15) { bestColor2 = '#f59e0b'; bestIcon2 = '🟡'; verdict2 = 'ATTENZIONE'; }
-        else { bestColor2 = '#ef4444'; bestIcon2 = '🔴'; verdict2 = 'TRAPPOLA'; }
-        var modelPick2 = overP >= 50 ? 'Over 2.5' : 'Under 2.5', bookPick2 = ouImpl.p1 >= 50 ? 'Over 2.5' : 'Under 2.5';
-        var divergence2 = modelPick2 !== bookPick2;
-        if (divergence2) { bestColor2 = '#eab308'; bestIcon2 = '🟡'; }
-        markets.push({ title: 'Over / Under 2.5', icon: '📊', picks: [
-          { label: 'Over 2.5', quota: avgOver, modelP: overP, bookP: ouImpl.p1, delta: overDelta, sharpQuota: sharpOver },
-          { label: 'Under 2.5', quota: avgUnder, modelP: underP, bookP: ouImpl.p2, delta: underDelta, sharpQuota: sharpUnder }
-        ], margin: ouImpl.margin, bestPick: bestPick2, bestDelta: bestDelta2, bestColor: bestColor2, bestIcon: bestIcon2, verdict: verdict2, divergence: divergence2, modelPick: modelPick2, bookPick: bookPick2 });
+        var v2 = buildVerdict(overP, underP, ouImpl.p1, ouImpl.p2, 'Over 2.5', 'Under 2.5');
+        markets.push({
+          title: 'Over / Under 2.5', icon: '📊',
+          quotaLabel1: 'Quota Over', quotaLabel2: 'Quota Under',
+          quota1: avgOver, quota2: avgUnder,
+          sharpQuota1: sharpOver, sharpQuota2: sharpUnder,
+          modelP1: overP, modelP2: underP,
+          bookP1: ouImpl.p1, bookP2: ouImpl.p2,
+          delta1: overP - ouImpl.p1, delta2: underP - ouImpl.p2,
+          label1: 'Over 2.5', label2: 'Under 2.5',
+          margin: ouImpl.margin,
+          ...v2
+        });
       }
+
       if (markets.length === 0) {
         if (state.oddsLab === false) return '<div style="padding:16px;color:#f87171;font-size:0.72rem;text-align:center;">❌ Quote non disponibili per il Reverse Quote Protocol.</div>';
         return '<div style="padding:16px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ In attesa delle quote bookmaker...</div>';
       }
-      var html = '<div style="display:flex;flex-direction:column;gap:16px;">';
+
+      // === RENDER LAYOUT STILE REVERSE xG PROTOCOL ===
+      var html = '<div style="display:flex;flex-direction:column;gap:14px;">';
       markets.forEach(function(mkt) {
         var bgGrad = mkt.bestDelta > 5 ? 'rgba(16,185,129,0.06)' : mkt.bestDelta < -5 ? 'rgba(239,68,68,0.05)' : 'rgba(148,163,184,0.04)';
-        html += '<div style="border:1.5px solid ' + mkt.bestColor + '30;border-radius:14px;overflow:hidden;background:' + bgGrad + ';">';
-        html += '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:space-between;">';
-        html += '<div style="font-size:0.85rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.icon + ' ' + mkt.title + ' — Reverse Quote</div>';
-        html += '<div style="font-size:0.6rem;color:var(--text-dark);">Margine: ' + mkt.margin + '%</div></div>';
-        html += '<div style="padding:14px;">';
-        mkt.picks.forEach(function(p) {
-          var isWinner = (mkt.bestPick === p.label);
-          var rowBg = isWinner ? mkt.bestColor + '08' : 'transparent';
-          var deltaColor = p.delta > 5 ? '#10b981' : p.delta > 0 ? '#22c55e' : p.delta > -5 ? '#94a3b8' : '#ef4444';
-          html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;background:' + rowBg + ';margin-bottom:6px;border:1px solid ' + (isWinner ? mkt.bestColor + '20' : 'transparent') + ';">';
-          html += '<div><div style="font-size:0.82rem;font-weight:700;color:white;">' + p.label + '</div>';
-          html += '<div style="font-size:0.6rem;color:var(--text-dark);">Quota media: @' + (p.quota || 0).toFixed(2) + (p.sharpQuota ? ' • Sharp: @' + p.sharpQuota.toFixed(2) : '') + '</div></div>';
-          html += '<div style="display:flex;gap:14px;align-items:center;">';
-          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Modello</div><div style="font-size:0.9rem;font-weight:800;color:var(--accent-cyan);">' + p.modelP.toFixed(0) + '%</div></div>';
-          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Book</div><div style="font-size:0.9rem;font-weight:800;color:var(--text-gray);">' + p.bookP.toFixed(0) + '%</div></div>';
-          html += '<div style="text-align:center;"><div style="font-size:0.55rem;color:var(--text-dark);">Delta</div><div style="font-size:0.9rem;font-weight:800;color:' + deltaColor + ';">' + (p.delta > 0 ? '+' : '') + p.delta.toFixed(1) + '%</div></div>';
-          html += '</div></div>';
-        });
-        html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:' + mkt.bestColor + '10;border:1.5px solid ' + mkt.bestColor + '30;margin-top:6px;">';
-        html += '<div style="font-size:1.2rem;">' + mkt.bestIcon + '</div>';
-        html += '<div style="flex:1;"><div style="font-size:0.78rem;font-weight:800;color:' + mkt.bestColor + ';">' + mkt.verdict + ' — ' + mkt.bestPick + '</div>';
-        if (mkt.divergence) {
-          var action = '';
-          if (Math.abs(mkt.picks[0].bookP - 50) < 5) action = '⛔ SKIP — Book indeciso';
-          else if (Math.abs(mkt.bestDelta) > 15) action = '⚠️ SINGOLA CAUTELA — stake minimo';
-          else action = '⛔ SKIP — divergenza modello/book';
-          html += '<div style="font-size:0.62rem;color:#eab308;margin-top:2px;">⚠️ DIVERGENZA: Modello dice ' + mkt.modelPick + ', Book dice ' + mkt.bookPick + '</div>';
-          html += '<div style="font-size:0.65rem;color:white;font-weight:700;margin-top:3px;">' + action + '</div>';
-        } else {
-          if (mkt.bestDelta > 15) html += '<div style="font-size:0.65rem;color:white;font-weight:700;margin-top:2px;">✅ GIOCA con fiducia</div>';
-          else if (mkt.bestDelta > 5) html += '<div style="font-size:0.65rem;color:white;margin-top:2px;">✅ GIOCABILE singola</div>';
-          else html += '<div style="font-size:0.62rem;color:var(--text-dark);margin-top:2px;">Neutro — nessun vantaggio chiaro</div>';
+
+        // Helper per colorare delta
+        function deltaColor(dlt) {
+          return dlt > 5 ? '#00e5a0' : dlt > 0 ? '#22c55e' : dlt > -5 ? '#94a3b8' : '#f87171';
         }
-        html += '</div></div></div></div>';
+        function fmtDelta(dlt) {
+          return (dlt > 0 ? '+' : '') + dlt.toFixed(1) + '%';
+        }
+
+        html += '<div style="background:' + bgGrad + '; border:1.5px solid ' + mkt.color + '40; border-radius:12px; padding:15px;">';
+
+        // Header: titolo + margine
+        html += '<div style="font-size:0.85rem; font-weight:800; color:' + mkt.color + '; margin-bottom:10px; display:flex; align-items:center; gap:6px;">';
+        html += '<span>' + mkt.icon + '</span> Reverse Quote — ' + mkt.title;
+        html += '<span style="font-size:0.55rem;color:var(--text-dark);margin-left:auto;">Margine: ' + mkt.margin + '%</span>';
+        html += '</div>';
+
+        // RIGA 1: 2 quote affiancate (stile Reverse xG con Quota 1/X/2)
+        html += '<div style="display:flex; gap:8px; margin-bottom:8px;">';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.2); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.65rem; color:var(--text-dark);">' + mkt.quotaLabel1 + '</div>';
+        html += '<div style="font-weight:700; color:white; font-size:1rem;">' + (mkt.quota1 || 0).toFixed(2) + '</div>';
+        if (mkt.sharpQuota1) html += '<div style="font-size:0.5rem;color:#60a5fa;margin-top:2px;">Sharp: @' + mkt.sharpQuota1.toFixed(2) + '</div>';
+        html += '</div>';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.2); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.65rem; color:var(--text-dark);">' + mkt.quotaLabel2 + '</div>';
+        html += '<div style="font-weight:700; color:white; font-size:1rem;">' + (mkt.quota2 || 0).toFixed(2) + '</div>';
+        if (mkt.sharpQuota2) html += '<div style="font-size:0.5rem;color:#60a5fa;margin-top:2px;">Sharp: @' + mkt.sharpQuota2.toFixed(2) + '</div>';
+        html += '</div>';
+        html += '</div>';
+
+        // RIGA 2: Modello / Bookie / Δ per opzione 1
+        html += '<div style="display:flex; gap:8px; margin-bottom:8px;">';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Modello ' + mkt.label1 + '</div>';
+        html += '<div style="font-weight:700; color:#60a5fa; font-size:0.9rem;">' + mkt.modelP1.toFixed(0) + '%</div>';
+        html += '</div>';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Bookie ' + mkt.label1 + '</div>';
+        html += '<div style="font-weight:700; color:#f59e0b; font-size:0.9rem;">' + mkt.bookP1.toFixed(0) + '%</div>';
+        html += '</div>';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Δ ' + mkt.label1 + '</div>';
+        html += '<div style="font-weight:800; color:' + deltaColor(mkt.delta1) + '; font-size:0.9rem;">' + fmtDelta(mkt.delta1) + '</div>';
+        html += '</div>';
+        html += '</div>';
+
+        // RIGA 3: Modello / Bookie / Δ per opzione 2
+        html += '<div style="display:flex; gap:8px; margin-bottom:10px;">';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Modello ' + mkt.label2 + '</div>';
+        html += '<div style="font-weight:700; color:#a78bfa; font-size:0.9rem;">' + mkt.modelP2.toFixed(0) + '%</div>';
+        html += '</div>';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Bookie ' + mkt.label2 + '</div>';
+        html += '<div style="font-weight:700; color:#f59e0b; font-size:0.9rem;">' + mkt.bookP2.toFixed(0) + '%</div>';
+        html += '</div>';
+        html += '<div style="flex:1; background:rgba(0,0,0,0.15); padding:8px; border-radius:8px; text-align:center;">';
+        html += '<div style="font-size:0.55rem; color:var(--text-dark);">Δ ' + mkt.label2 + '</div>';
+        html += '<div style="font-weight:800; color:' + deltaColor(mkt.delta2) + '; font-size:0.9rem;">' + fmtDelta(mkt.delta2) + '</div>';
+        html += '</div>';
+        html += '</div>';
+
+        // VERDETTO FINALE — box stile Reverse xG
+        var verdictText = '';
+        if (mkt.divergence) {
+          verdictText = '⚠️ DIVERGENZA: Modello dice <strong>' + mkt.modelPick + '</strong>, Book dice <strong>' + mkt.bookPick + '</strong>. ';
+          if (Math.abs(mkt.bestDelta) > 15) verdictText += 'SINGOLA con stake minimo (cautela).';
+          else verdictText += 'SKIP — divergenza modello/book.';
+        } else {
+          if (mkt.bestDelta > 15) verdictText = '✅ VALUE FORTE su <strong>' + mkt.bestPick + '</strong>. Il modello (' + (mkt.bestPick === mkt.label1 ? mkt.modelP1.toFixed(0) : mkt.modelP2.toFixed(0)) + '%) batte il bookie (' + (mkt.bestPick === mkt.label1 ? mkt.bookP1.toFixed(0) : mkt.bookP2.toFixed(0)) + '%) di ' + Math.abs(mkt.bestDelta).toFixed(1) + ' punti. GIOCA con fiducia.';
+          else if (mkt.bestDelta > 5) verdictText = '✅ VALUE su <strong>' + mkt.bestPick + '</strong>. Quota interessante. Giocabile in singola.';
+          else if (mkt.bestDelta > -5) verdictText = '⚪ Mercato ALLINEATO — modello e bookie concordano. Nessun vantaggio chiaro.';
+          else if (mkt.bestDelta > -15) verdictText = '🟡 ATTENZIONE — il bookie sopravvaluta <strong>' + mkt.bestPick + '</strong>. Considera l\'opposto.';
+          else verdictText = '🔴 TRAPPOLA su <strong>' + mkt.bestPick + '</strong>. Il bookie ti spinge in questa direzione, modello in disaccordo.';
+        }
+
+        html += '<div style="font-size:0.78rem; color:' + mkt.color + '; opacity:0.95; line-height:1.5; background:rgba(0,0,0,0.15); padding:10px; border-radius:8px; display:flex; gap:8px; align-items:flex-start;">';
+        html += '<span style="font-size:1rem;flex-shrink:0;">' + mkt.icon + '</span>';
+        html += '<div><strong>' + mkt.verdict + '</strong> — ' + verdictText + '</div>';
+        html += '</div>';
+
+        html += '</div>'; // chiusura card
       });
       html += '</div>';
       return html;
@@ -12640,6 +12787,104 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               <!-- CLASSIFICA E MOTIVAZIONE -->
               <div class="analysis-card">
                 <div class="card-title"><div class="card-title-icon">&#x1F3C6;</div><span>Classifica</span></div>
+
+            <!-- ============================================================ -->
+            <!-- MINI-CLASSIFICA REALE (8 righe centrate sulle 2 squadre)     -->
+            <!-- ============================================================ -->
+            ${d.miniStandings && d.miniStandings.length > 0 ? `
+              <div style="margin-bottom:14px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);border-radius:10px;overflow:hidden;">
+                <div style="padding:8px 12px;background:rgba(0,229,160,0.06);border-bottom:1px solid rgba(0,229,160,0.15);font-size:0.7rem;font-weight:700;color:var(--accent-cyan);display:flex;align-items:center;gap:6px;">
+                  📋 Classifica Reale ${m.league?.name || ''}
+                </div>
+                <div style="display:grid;grid-template-columns:32px 1fr 30px 30px 30px 30px 38px 38px;gap:0;font-size:0.65rem;">
+                  <div style="padding:6px 4px;color:var(--text-dark);font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">#</div>
+                  <div style="padding:6px 8px;color:var(--text-dark);font-size:0.55rem;font-weight:700;background:rgba(255,255,255,0.02);">Squadra</div>
+                  <div style="padding:6px 2px;color:var(--text-dark);font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">G</div>
+                  <div style="padding:6px 2px;color:#10b981;font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">V</div>
+                  <div style="padding:6px 2px;color:#fbbf24;font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">N</div>
+                  <div style="padding:6px 2px;color:#f87171;font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">P</div>
+                  <div style="padding:6px 2px;color:var(--text-dark);font-size:0.55rem;text-align:center;font-weight:700;background:rgba(255,255,255,0.02);">DR</div>
+                  <div style="padding:6px 2px;color:var(--accent-cyan);font-size:0.55rem;text-align:center;font-weight:800;background:rgba(255,255,255,0.02);">Pt</div>
+                  ${d.miniStandings.map(t => {
+                    const highlight = t.isHome ? 'background:rgba(96,165,250,0.10);border-left:3px solid #60a5fa;' :
+                                      t.isAway ? 'background:rgba(167,139,250,0.10);border-left:3px solid #a78bfa;' : '';
+                    const teamColor = t.isHome ? '#60a5fa' : t.isAway ? '#a78bfa' : 'white';
+                    const fontWeight = (t.isHome || t.isAway) ? '800' : '500';
+                    const dr = t.goalDiff > 0 ? '+' + t.goalDiff : t.goalDiff;
+                    const drColor = t.goalDiff > 0 ? '#10b981' : t.goalDiff < 0 ? '#f87171' : 'var(--text-dark)';
+                    return `
+                      <div style="padding:6px 4px;text-align:center;color:var(--text-dark);font-weight:600;${highlight}">${t.rank}</div>
+                      <div style="padding:6px 8px;color:${teamColor};font-weight:${fontWeight};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${highlight}">${t.teamName}</div>
+                      <div style="padding:6px 2px;text-align:center;color:var(--text-gray);${highlight}">${t.played}</div>
+                      <div style="padding:6px 2px;text-align:center;color:#10b981;${highlight}">${t.won}</div>
+                      <div style="padding:6px 2px;text-align:center;color:#fbbf24;${highlight}">${t.draw}</div>
+                      <div style="padding:6px 2px;text-align:center;color:#f87171;${highlight}">${t.lost}</div>
+                      <div style="padding:6px 2px;text-align:center;color:${drColor};font-weight:600;${highlight}">${dr}</div>
+                      <div style="padding:6px 2px;text-align:center;color:white;font-weight:800;${highlight}">${t.points}</div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            ` : ''}
+
+            <!-- ============================================================ -->
+            <!-- DETTAGLIO CASA / TRASFERTA per ciascuna squadra              -->
+            <!-- ============================================================ -->
+            ${(d.homePosition?.home || d.awayPosition?.away) ? `
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+                ${d.homePosition?.home ? `
+                  <div style="background:rgba(96,165,250,0.06);border:1px solid rgba(96,165,250,0.2);border-radius:10px;padding:10px;">
+                    <div style="font-size:0.6rem;font-weight:800;color:#60a5fa;margin-bottom:8px;display:flex;align-items:center;gap:4px;">🏠 ${m.home.name.split(' ')[0]} in Casa</div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Record</span>
+                      <span style="color:white;font-weight:700;">
+                        <span style="color:#10b981;">${d.homePosition.home.won}V</span> ·
+                        <span style="color:#fbbf24;">${d.homePosition.home.draw}N</span> ·
+                        <span style="color:#f87171;">${d.homePosition.home.lost}P</span>
+                      </span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Gol Fatti</span>
+                      <span style="color:white;font-weight:700;">${d.homePosition.home.goalsFor}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Gol Subiti</span>
+                      <span style="color:white;font-weight:700;">${d.homePosition.home.goalsAgainst}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;">
+                      <span style="color:var(--text-dark);">Media gol/match</span>
+                      <span style="color:#60a5fa;font-weight:800;">${d.homePosition.home.played > 0 ? ((d.homePosition.home.goalsFor + d.homePosition.home.goalsAgainst) / d.homePosition.home.played).toFixed(2) : '0.00'}</span>
+                    </div>
+                  </div>
+                ` : '<div></div>'}
+                ${d.awayPosition?.away ? `
+                  <div style="background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.2);border-radius:10px;padding:10px;">
+                    <div style="font-size:0.6rem;font-weight:800;color:#a78bfa;margin-bottom:8px;display:flex;align-items:center;gap:4px;">✈️ ${m.away.name.split(' ')[0]} in Trasferta</div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Record</span>
+                      <span style="color:white;font-weight:700;">
+                        <span style="color:#10b981;">${d.awayPosition.away.won}V</span> ·
+                        <span style="color:#fbbf24;">${d.awayPosition.away.draw}N</span> ·
+                        <span style="color:#f87171;">${d.awayPosition.away.lost}P</span>
+                      </span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Gol Fatti</span>
+                      <span style="color:white;font-weight:700;">${d.awayPosition.away.goalsFor}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;margin-bottom:3px;">
+                      <span style="color:var(--text-dark);">Gol Subiti</span>
+                      <span style="color:white;font-weight:700;">${d.awayPosition.away.goalsAgainst}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.65rem;">
+                      <span style="color:var(--text-dark);">Media gol/match</span>
+                      <span style="color:#a78bfa;font-weight:800;">${d.awayPosition.away.played > 0 ? ((d.awayPosition.away.goalsFor + d.awayPosition.away.goalsAgainst) / d.awayPosition.away.played).toFixed(2) : '0.00'}</span>
+                    </div>
+                  </div>
+                ` : '<div></div>'}
+              </div>
+            ` : ''}
+
             ${d.homePosition ? `
               <div class="standings-card">
                 <div class="standings-header">
