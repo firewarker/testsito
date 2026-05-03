@@ -4311,9 +4311,26 @@
         }
       }
 
-      h = clamp(1.0, h, 5.5);
-      a = clamp(0.8, a, 5.0);
+      // === DIAGNOSTIC LOG temporaneo ===
+      const inputH = homeData.cards;
+      const inputA = awayData.cards;
+      const fsCardsH = fsMatch?.home_cards;
+      const fsCardsA = fsMatch?.away_cards;
+
+      h = clamp(1.0, h, 4.0);  // Ridotto da 5.5 a 4.0 (più realistico per Serie A)
+      a = clamp(0.8, a, 3.8);  // Ridotto da 5.0 a 3.8
       const total = h + a;
+
+      console.log('🟨 calcCards DEBUG:', {
+        inputCardsHome: inputH,
+        inputCardsAway: inputA,
+        fsOverrideHome: fsCardsH,
+        fsOverrideAway: fsCardsA,
+        finalH: h.toFixed(2),
+        finalA: a.toFixed(2),
+        total: total.toFixed(2),
+        referee: refInfo
+      });
       
       const probs = {};
       
