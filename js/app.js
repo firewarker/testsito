@@ -5081,6 +5081,28 @@ async function analyzeMatch(match) {
       const failedToScorePct = stats.failed_to_score && played > 0 ?
         ((side === 'home' ? stats.failed_to_score.home : stats.failed_to_score.away) || stats.failed_to_score.total || 0) / played * 100 : 25;
 
+      // === CARTELLINI REALI ===
+      // BUG FIX: stats.cards.yellow NON ha un campo "total" diretto.
+      // La struttura è { '0-15': {total: N}, '16-30': {total: N}, ..., '76-90': {total: N} }
+      // Bisogna sommare tutti i bucket temporali per avere il totale stagionale.
+      // Aggiungiamo anche i rossi (pesati x2) per migliore stima cartellini totali.
+      let totalYellow = 0, totalRed = 0;
+      try {
+        const yellowBuckets = stats.cards?.yellow || {};
+        Object.values(yellowBuckets).forEach(bucket => {
+          if (bucket && typeof bucket.total === 'number') totalYellow += bucket.total;
+        });
+        const redBuckets = stats.cards?.red || {};
+        Object.values(redBuckets).forEach(bucket => {
+          if (bucket && typeof bucket.total === 'number') totalRed += bucket.total;
+        });
+      } catch(e) { /* fallback a default */ }
+
+      // Cartellini medi per match: gialli + rossi pesati 2x (un rosso "vale" come 2 gialli per il modello)
+      const cardsPerMatch = (played > 0 && totalYellow > 0)
+        ? (totalYellow + totalRed * 2) / played
+        : 1.8; // fallback se dati assenti
+
       // NOTA: API-Football `team/statistics` NON restituisce shots aggregati per stagione.
       // Verificato sul campo: il payload contiene solo goals, fixtures, cards, lineups, clean_sheet,
       // failed_to_score, biggest, penalty. I shots per stagione richiederebbero N chiamate
@@ -5092,7 +5114,10 @@ async function analyzeMatch(match) {
         goalsAgainst: parseFloat(againstAvg) || 1.2,
         form: stats.form || 'DDDDD',
         corners: 5.0,
-        cards: parseFloat(stats.cards?.yellow?.total) / (played || 1) || 1.8,
+        cards: cardsPerMatch,
+        // Espongo anche i raw per uso futuro (es. distribuzione cartellini per minuto)
+        totalYellowSeason: totalYellow,
+        totalRedSeason: totalRed,
         cleanSheetPct: cleanSheetPct || 25,
         failedToScorePct: failedToScorePct || 25,
         played, wins, draws, losses,
