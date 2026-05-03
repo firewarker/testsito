@@ -5092,23 +5092,39 @@ async function analyzeMatch(match) {
         ((side === 'home' ? stats.failed_to_score.home : stats.failed_to_score.away) || stats.failed_to_score.total || 0) / played * 100 : 25;
 
       // === CARTELLINI REALI ===
-      // BUG FIX: stats.cards.yellow NON ha un campo "total" diretto.
-      // La struttura è { '0-15': {total: N}, '16-30': {total: N}, ..., '76-90': {total: N} }
-      // Bisogna sommare tutti i bucket temporali per avere il totale stagionale.
-      // Aggiungiamo anche i rossi (pesati x2) per migliore stima cartellini totali.
+      // BUG FIX v2: stats.cards.yellow ha bucket per fascia minuto + a volte un bucket vuoto "".
+      // Filtriamo SOLO le chiavi con formato orario "X-Y" (es. "0-15", "76-90", "91-105").
+      // Inoltre alcune API restituiscono ANCHE valori cumulativi che gonfierebbero il totale.
       let totalYellow = 0, totalRed = 0;
       try {
         const yellowBuckets = stats.cards?.yellow || {};
-        Object.values(yellowBuckets).forEach(bucket => {
-          if (bucket && typeof bucket.total === 'number') totalYellow += bucket.total;
+        Object.entries(yellowBuckets).forEach(([key, bucket]) => {
+          // Solo chiavi formato "N-M" (fasce minuto valide)
+          if (/^\d+-\d+$/.test(key) && bucket && typeof bucket.total === 'number') {
+            totalYellow += bucket.total;
+          }
         });
         const redBuckets = stats.cards?.red || {};
-        Object.values(redBuckets).forEach(bucket => {
-          if (bucket && typeof bucket.total === 'number') totalRed += bucket.total;
+        Object.entries(redBuckets).forEach(([key, bucket]) => {
+          if (/^\d+-\d+$/.test(key) && bucket && typeof bucket.total === 'number') {
+            totalRed += bucket.total;
+          }
         });
+
+        // Log diagnostico una volta per debug
+        if (side === 'home') {
+          console.log('🟨 Cards Extraction DEBUG (home):', {
+            yellowKeysAll: Object.keys(stats.cards?.yellow || {}),
+            yellowBucketsSample: stats.cards?.yellow,
+            totalYellowComputed: totalYellow,
+            totalRedComputed: totalRed,
+            played: played,
+            cardsPerMatchComputed: (totalYellow + totalRed * 2) / played
+          });
+        }
       } catch(e) { /* fallback a default */ }
 
-      // Cartellini medi per match: gialli + rossi pesati 2x (un rosso "vale" come 2 gialli per il modello)
+      // Cartellini medi per match: gialli + rossi pesati 2x
       const cardsPerMatch = (played > 0 && totalYellow > 0)
         ? (totalYellow + totalRed * 2) / played
         : 1.8; // fallback se dati assenti
