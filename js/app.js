@@ -4522,6 +4522,12 @@ async function analyzeMatch(match) {
         ]);
         homeStats = hs?.response;
         awayStats = as?.response;
+        // === DIAGNOSTICO TEMPORANEO: salva in state per ispezione console ===
+        // Permette comando: console.log(state.debugLastHomeStats)
+        try {
+          state.debugLastHomeStats = homeStats;
+          state.debugLastAwayStats = awayStats;
+        } catch(e) {}
       } catch (e) {}
       
       // Ottieni ultime 5 partite per calcolare form REALE
