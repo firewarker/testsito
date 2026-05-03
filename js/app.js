@@ -4311,26 +4311,9 @@
         }
       }
 
-      // === DIAGNOSTIC LOG temporaneo ===
-      const inputH = homeData.cards;
-      const inputA = awayData.cards;
-      const fsCardsH = fsMatch?.home_cards;
-      const fsCardsA = fsMatch?.away_cards;
-
-      h = clamp(1.0, h, 4.0);  // Ridotto da 5.5 a 4.0 (più realistico per Serie A)
-      a = clamp(0.8, a, 3.8);  // Ridotto da 5.0 a 3.8
+      h = clamp(1.0, h, 4.0);  // Clamp realistico per Serie A (max 4 cartellini per squadra)
+      a = clamp(0.8, a, 3.8);
       const total = h + a;
-
-      console.log('🟨 calcCards DEBUG:', {
-        inputCardsHome: inputH,
-        inputCardsAway: inputA,
-        fsOverrideHome: fsCardsH,
-        fsOverrideAway: fsCardsA,
-        finalH: h.toFixed(2),
-        finalA: a.toFixed(2),
-        total: total.toFixed(2),
-        referee: refInfo
-      });
       
       const probs = {};
       
@@ -5092,9 +5075,15 @@ async function analyzeMatch(match) {
         ((side === 'home' ? stats.failed_to_score.home : stats.failed_to_score.away) || stats.failed_to_score.total || 0) / played * 100 : 25;
 
       // === CARTELLINI REALI ===
-      // BUG FIX v2: stats.cards.yellow ha bucket per fascia minuto + a volte un bucket vuoto "".
-      // Filtriamo SOLO le chiavi con formato orario "X-Y" (es. "0-15", "76-90", "91-105").
-      // Inoltre alcune API restituiscono ANCHE valori cumulativi che gonfierebbero il totale.
+      // BUG FIX v3: i cartellini stagionali (stats.cards.yellow per fasce minute) sono
+      // AGGREGATI SU TUTTA LA STAGIONE (casa + trasferta), non solo casa o solo trasferta.
+      // Quindi devono essere divisi per il TOTALE di partite giocate, non solo home/away.
+      // 
+      // Esempio Bologna: 59 gialli totali stagione, played.total = 34 (17 casa + 17 trasferta)
+      //   Corretto: 59 / 34 = 1.74 gialli/match
+      //   Errato: 59 / 17 = 3.47 (raddoppia)
+      const playedTotal = fixtures.played?.total || (played * 2) || 20;
+
       let totalYellow = 0, totalRed = 0;
       try {
         const yellowBuckets = stats.cards?.yellow || {};
@@ -5110,23 +5099,11 @@ async function analyzeMatch(match) {
             totalRed += bucket.total;
           }
         });
-
-        // Log diagnostico una volta per debug
-        if (side === 'home') {
-          console.log('🟨 Cards Extraction DEBUG (home):', {
-            yellowKeysAll: Object.keys(stats.cards?.yellow || {}),
-            yellowBucketsSample: stats.cards?.yellow,
-            totalYellowComputed: totalYellow,
-            totalRedComputed: totalRed,
-            played: played,
-            cardsPerMatchComputed: (totalYellow + totalRed * 2) / played
-          });
-        }
       } catch(e) { /* fallback a default */ }
 
-      // Cartellini medi per match: gialli + rossi pesati 2x
-      const cardsPerMatch = (played > 0 && totalYellow > 0)
-        ? (totalYellow + totalRed * 2) / played
+      // Cartellini medi per match: gialli + rossi pesati 2x, divisi per partite TOTALI stagione
+      const cardsPerMatch = (playedTotal > 0 && totalYellow > 0)
+        ? (totalYellow + totalRed * 2) / playedTotal
         : 1.8; // fallback se dati assenti
 
       // NOTA: API-Football `team/statistics` NON restituisce shots aggregati per stagione.
