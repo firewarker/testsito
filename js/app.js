@@ -4205,7 +4205,7 @@
     }
 
     function calcCards(homeData, awayData, fsMatch, refereeName) {
-      // Base: media cartellini per squadra
+      // Base: media cartellini per squadra (ora valori reali da API, ~1.5-2.8 per Serie A)
       let h = homeData.cards || 2.1;
       let a = awayData.cards || 1.9;
       
@@ -4215,96 +4215,89 @@
         if (fsMatch.away_cards) a = fsMatch.away_cards;
       }
       
-      // MIGLIORAMENTO AVANZATO: 12+ fattori che influenzano i cartellini
+      // ============================================================================
+      // RICALIBRAZIONE — i fattori sono stati attenuati dopo il fix dei dati reali
+      // ============================================================================
+      // Prima il modello partiva da 1.8 universale (bug) e i fattori erano calibrati per
+      // amplificare verso valori realistici. Ora che la base è già reale (es. 2.12 per Bologna),
+      // i fattori sono volutamente più CONSERVATIVI per evitare sovrastime a cascata.
+      // Target totale partita: 4.0-5.5 cartellini per Serie A (media reale stagione).
       
-      // 1. Squadre sotto pressione (subiscono gol) → Più falli disperati → Più cartellini (graduale)
-      if (homeData.goalsAgainst >= 2.5) h *= 1.18;
-      else if (homeData.goalsAgainst >= 2.0) h *= 1.14;
-      else if (homeData.goalsAgainst >= 1.5) h *= 1.10;
-      else if (homeData.goalsAgainst >= 1.2) h *= 1.05;
+      // 1. Squadre sotto pressione (subiscono gol) → Più falli disperati
+      if (homeData.goalsAgainst >= 2.5) h *= 1.10;
+      else if (homeData.goalsAgainst >= 2.0) h *= 1.07;
+      else if (homeData.goalsAgainst >= 1.5) h *= 1.04;
       
-      if (awayData.goalsAgainst >= 2.8) a *= 1.22; // Ospite subisce molto (in trasferta è peggio)
-      else if (awayData.goalsAgainst >= 2.2) a *= 1.16;
-      else if (awayData.goalsAgainst >= 1.8) a *= 1.12;
-      else if (awayData.goalsAgainst >= 1.4) a *= 1.07;
+      if (awayData.goalsAgainst >= 2.8) a *= 1.12;
+      else if (awayData.goalsAgainst >= 2.2) a *= 1.08;
+      else if (awayData.goalsAgainst >= 1.8) a *= 1.05;
       
-      // 2. Squadre offensive aggressive (molti gol + molti subiti = partite intense = più falli)
-      if (homeData.goalsFor >= 2.5 && homeData.goalsAgainst >= 1.8) h *= 1.12;
-      else if (homeData.goalsFor >= 2.0 && homeData.goalsAgainst >= 1.3) h *= 1.08;
-      if (awayData.goalsFor >= 2.2 && awayData.goalsAgainst >= 2.0) a *= 1.14;
-      else if (awayData.goalsFor >= 1.8 && awayData.goalsAgainst >= 1.5) a *= 1.10;
+      // 2. Squadre offensive aggressive (molti gol + molti subiti)
+      if (homeData.goalsFor >= 2.5 && homeData.goalsAgainst >= 1.8) h *= 1.06;
+      else if (homeData.goalsFor >= 2.0 && homeData.goalsAgainst >= 1.3) h *= 1.04;
+      if (awayData.goalsFor >= 2.2 && awayData.goalsAgainst >= 2.0) a *= 1.07;
+      else if (awayData.goalsFor >= 1.8 && awayData.goalsAgainst >= 1.5) a *= 1.04;
       
-      // 3. Squadre difensive disciplinate (pochi gol, pochi subiti = gioco controllato = meno falli)
-      if (homeData.goalsFor <= 0.8 && homeData.goalsAgainst <= 0.8) h *= 0.82;
-      else if (homeData.goalsFor <= 1.0 && homeData.goalsAgainst <= 1.0) h *= 0.88;
-      if (awayData.goalsFor <= 0.7 && awayData.goalsAgainst <= 0.7) a *= 0.80;
-      else if (awayData.goalsFor <= 0.8 && awayData.goalsAgainst <= 0.8) a *= 0.85;
+      // 3. Squadre difensive disciplinate
+      if (homeData.goalsFor <= 0.8 && homeData.goalsAgainst <= 0.8) h *= 0.85;
+      else if (homeData.goalsFor <= 1.0 && homeData.goalsAgainst <= 1.0) h *= 0.92;
+      if (awayData.goalsFor <= 0.7 && awayData.goalsAgainst <= 0.7) a *= 0.83;
+      else if (awayData.goalsFor <= 0.8 && awayData.goalsAgainst <= 0.8) a *= 0.90;
       
-      // 4. Ritmo di gioco alto → Più cartellini (graduale)
+      // 4. Ritmo di gioco alto → Più cartellini (attenuato)
       const homeIntensity = homeData.goalsFor + homeData.goalsAgainst;
       const awayIntensity = awayData.goalsFor + awayData.goalsAgainst;
       
-      if (homeIntensity >= 4.0) h *= 1.10;
-      else if (homeIntensity >= 3.5) h *= 1.06;
-      if (awayIntensity >= 3.8) a *= 1.09;
-      else if (awayIntensity >= 3.2) a *= 1.05;
+      if (homeIntensity >= 4.0) h *= 1.05;
+      else if (homeIntensity >= 3.5) h *= 1.03;
+      if (awayIntensity >= 3.8) a *= 1.05;
+      else if (awayIntensity >= 3.2) a *= 1.03;
       
-      // 5. Partite equilibrate (differenza xG bassa) → Più tensione → Più cartellini
+      // 5. Partite equilibrate → Più tensione (attenuato)
       const balanceDiff = Math.abs(homeData.goalsFor - awayData.goalsFor);
       if (balanceDiff <= 0.2) {
-        h *= 1.12; // Partita molto equilibrata = massima tensione
-        a *= 1.12;
+        h *= 1.05; a *= 1.05;
       } else if (balanceDiff <= 0.3) {
-        h *= 1.08;
-        a *= 1.08;
-      } else if (balanceDiff <= 0.5) {
-        h *= 1.04;
-        a *= 1.04;
+        h *= 1.03; a *= 1.03;
       }
       
-      // 6. Fattore trasferta: squadre ospiti tendono a fare più falli
-      a *= 1.08;
+      // 6. Fattore trasferta (attenuato da 1.08 a 1.04)
+      a *= 1.04;
       
-      // 7. Derby / Rivalità (se entrambe hanno alti cartellini medi)
-      if (h >= 2.5 && a >= 2.3) {
-        h *= 1.14; // Partita molto tesa
-        a *= 1.14;
-      } else if (h >= 2.3 && a >= 2.1) {
-        h *= 1.10;
-        a *= 1.10;
+      // 7. Derby / Rivalità (soglie alzate per evitare false attivazioni)
+      // PRIMA: scattava facilmente perché valori sempre alti per il bug
+      // ORA: scatta solo per squadre davvero "fisiche" (>2.5 gialli/match REALI)
+      if (h >= 2.7 && a >= 2.5) {
+        h *= 1.06; a *= 1.06;
       }
       
-      // 8. Importanza della partita (squadre forti = partite importanti = più tensione)
+      // 8. Importanza partita (attenuato)
       if (homeData.goalsFor >= 2.0 && awayData.goalsFor >= 1.8) {
-        h *= 1.06;
-        a *= 1.06;
-      } else if (homeData.goalsFor >= 1.8 && awayData.goalsFor >= 1.5) {
-        h *= 1.04;
-        a *= 1.04;
+        h *= 1.03; a *= 1.03;
       }
       
-      // 9. Forma recente negativa → Più frustrazione → Più falli
+      // 9. Forma recente negativa → Più frustrazione (attenuato)
       const homeForm = (homeData.goalsFor / Math.max(homeData.goalsAgainst, 0.5));
       const awayForm = (awayData.goalsFor / Math.max(awayData.goalsAgainst, 0.5));
       
-      if (homeForm <= 0.5) h *= 1.08; // Casa in crisi
-      else if (homeForm <= 0.7) h *= 1.04;
-      if (awayForm <= 0.4) a *= 1.10; // Ospite in crisi
-      else if (awayForm <= 0.6) a *= 1.05;
+      if (homeForm <= 0.5) h *= 1.05;
+      else if (homeForm <= 0.7) h *= 1.02;
+      if (awayForm <= 0.4) a *= 1.06;
+      else if (awayForm <= 0.6) a *= 1.03;
       
-      // 10. Win rate basso → Squadre perdenti fanno più falli per disperazione
-      if (homeData.winRate && homeData.winRate <= 25) h *= 1.08;
-      else if (homeData.winRate && homeData.winRate <= 35) h *= 1.04;
-      if (awayData.winRate && awayData.winRate <= 20) a *= 1.10;
-      else if (awayData.winRate && awayData.winRate <= 30) a *= 1.05;
+      // 10. Win rate basso (attenuato)
+      if (homeData.winRate && homeData.winRate <= 25) h *= 1.04;
+      else if (homeData.winRate && homeData.winRate <= 35) h *= 1.02;
+      if (awayData.winRate && awayData.winRate <= 20) a *= 1.05;
+      else if (awayData.winRate && awayData.winRate <= 30) a *= 1.02;
       
-      // 11. Squadre veloci (molti gol) vs squadre lente (pochi gol) = più falli per fermare contropiede
-      if (homeData.goalsFor >= 2.0 && awayData.goalsFor <= 1.0) a *= 1.06;
-      if (awayData.goalsFor >= 1.8 && homeData.goalsFor <= 1.0) h *= 1.05;
+      // 11. Squadre veloci vs lente (attenuato)
+      if (homeData.goalsFor >= 2.0 && awayData.goalsFor <= 1.0) a *= 1.03;
+      if (awayData.goalsFor >= 1.8 && homeData.goalsFor <= 1.0) h *= 1.03;
       
-      // 12. Clean sheet basso = difese che subiscono pressione = più falli
-      if (homeData.cleanSheetPct && homeData.cleanSheetPct <= 20) h *= 1.05;
-      if (awayData.cleanSheetPct && awayData.cleanSheetPct <= 15) a *= 1.06;
+      // 12. Clean sheet basso (attenuato)
+      if (homeData.cleanSheetPct && homeData.cleanSheetPct <= 20) h *= 1.03;
+      if (awayData.cleanSheetPct && awayData.cleanSheetPct <= 15) a *= 1.03;
       
       // === FATTORE ARBITRO ===
       // Se l'arbitro è nel database, applica il moltiplicatore severità.
