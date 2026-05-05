@@ -4154,7 +4154,7 @@ async function analyzeMatch(match) {
             if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
-            const dropSig1 = computeDroppingOddsSignal(match.id, oddsLab);
+            const dropSig1 = computeDroppingOddsSignal(match.id, oddsLab, new Date(match.date).getTime());
             state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis, dropSig1);
             render();
           } catch(e) {
@@ -4321,7 +4321,7 @@ async function analyzeMatch(match) {
           
           // Consensus Engine (richiede tutti i dati)
           const aiForConsensus = generateAIAdvice(match, state.analysis);
-          const dropSig3 = computeDroppingOddsSignal(match.id, oddsLab);
+          const dropSig3 = computeDroppingOddsSignal(match.id, oddsLab, new Date(match.date).getTime());
           state.consensus = buildConsensusEngine(
             match, state.analysis, aiForConsensus, oddsLab, state.regressionScore,
             state.superAIAnalysis, state.superAnalysis, dropSig3
@@ -7161,7 +7161,7 @@ async function analyzeMatch(match) {
       }
     }
     
-    function computeDroppingOddsSignal(matchId, currentOddsLab) {
+    function computeDroppingOddsSignal(matchId, currentOddsLab, matchTimestamp) {
       try {
         if (!matchId || !currentOddsLab || !currentOddsLab.consensus) return null;
         const KEY = 'bp2_odds_snapshots';
@@ -7172,10 +7172,32 @@ async function analyzeMatch(match) {
         const current = currentOddsLab.consensus;
         const now = Date.now();
         
-        // Cerca uno snapshot "vecchio" (>= 12h fa). Se non c'è, usa il più vecchio disponibile.
-        const minOldT = now - 12 * 3600 * 1000;
-        const oldSnap = history.find(s => s.t <= minOldT) || history[0];
+        // === FINESTRA ADATTIVA basata su tempo al kickoff ===
+        // Lo "smart money" entra spesso nelle ultime ore. Se il match è imminente,
+        // confrontiamo con uno snapshot più vicino per cogliere il movimento finale.
+        let lookbackHours = 12; // default: partita lontana o data sconosciuta
+        if (matchTimestamp) {
+          const msToMatch = matchTimestamp - now;
+          const hoursToMatch = msToMatch / 3600000;
+          if (hoursToMatch < 0) return null; // partita già iniziata o passata
+          if (hoursToMatch < 3)        lookbackHours = 2;   // imminente: cattura formazioni ufficiali
+          else if (hoursToMatch < 12)  lookbackHours = 4;   // entro mezza giornata
+          else if (hoursToMatch < 36)  lookbackHours = 8;   // entro 1.5 giorni
+          else                         lookbackHours = 12;  // partita lontana
+        }
+        
+        // Trova il PIÙ RECENTE snapshot che sia ALMENO lookbackHours fa
+        // (così il drop riflette il movimento dell'ultima finestra utile)
+        const minOldT = now - lookbackHours * 3600 * 1000;
+        const candidates = history.filter(s => s.t <= minOldT);
+        const oldSnap = candidates.length > 0
+          ? candidates[candidates.length - 1]  // il più recente fra i "vecchi"
+          : history[0];                        // fallback: il più vecchio disponibile
         const hoursElapsed = (now - oldSnap.t) / 3600000;
+        
+        // Se il "vecchio" snapshot è troppo recente rispetto alla finestra ottimale,
+        // segnaliamo ma con confidence ridotta più avanti.
+        const windowQuality = Math.min(1, hoursElapsed / lookbackHours);
         
         // Drop = aumento prob implicita (= quote scendono = soldi entrano)
         const drops = [
@@ -7201,11 +7223,13 @@ async function analyzeMatch(match) {
         // Soglia: drop >= 4 punti percentuali (+ filtro: il pick attualmente deve avere prob >= 35)
         if (top.delta < 4 || top.currentProb < 35) return null;
         
-        // Confidence proporzionale al drop
+        // Confidence proporzionale al drop, scalata per windowQuality
         let confidence = 55;
         if (top.delta >= 8) confidence = 65;
         if (top.delta >= 12) confidence = 75;
         if (top.delta >= 16) confidence = 82;
+        // Se la finestra è di scarsa qualità (storico troppo recente), riduci confidence
+        confidence = Math.round(confidence * (0.7 + 0.3 * windowQuality));
         
         return {
           pick: top.pick,
@@ -7213,7 +7237,9 @@ async function analyzeMatch(match) {
           delta: top.delta.toFixed(1),
           currentProb: top.currentProb.toFixed(1),
           hoursElapsed: hoursElapsed.toFixed(1),
-          oldProb: (top.currentProb - top.delta).toFixed(1)
+          oldProb: (top.currentProb - top.delta).toFixed(1),
+          lookbackHours: lookbackHours,
+          windowQuality: windowQuality.toFixed(2)
         };
       } catch(e) {
         console.warn('computeDroppingOddsSignal error:', e);
@@ -7546,17 +7572,47 @@ async function analyzeMatch(match) {
         </div>
       `).join('');
       
+      // Badge Drop Detector se la famiglia drops è attiva
+      const dropFamily = (consensus.familyVotes || []).find(f => f.family === 'drops');
+      let dropBadge = '';
+      if (dropFamily) {
+        const agreesWithMain = dropFamily.pick === consensus.pick;
+        const bgColor = agreesWithMain ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.10)';
+        const borderColor = agreesWithMain ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.30)';
+        const textColor = agreesWithMain ? '#10b981' : '#ef4444';
+        const icon = agreesWithMain ? '📉' : '⚠️';
+        const label = agreesWithMain ? 'SMART MONEY conferma' : 'DRIFT BOOK contrario';
+        dropBadge = `<div style="margin-top:8px;padding:7px 11px;background:${bgColor};border:1px solid ${borderColor};border-radius:8px;font-size:0.66rem;display:flex;align-items:center;gap:8px;">
+          <span style="font-size:0.85rem;">${icon}</span>
+          <span style="font-weight:800;color:${textColor};letter-spacing:0.03em;">${label}</span>
+          <span style="color:var(--text-dark);font-family:'JetBrains Mono',monospace;font-size:0.62rem;">→ ${dropFamily.pick} ${dropFamily.prob}%</span>
+        </div>`;
+      }
+      
+      // Pannello famiglie indipendenti (sostituisce il vecchio "fonti")
+      const familyBadges = (consensus.familyVotes || []).map(fv => {
+        const agrees = fv.pick === consensus.pick;
+        const famIcon = fv.family === 'xg' ? '🎯' : fv.family === 'market' ? '💰' : fv.family === 'meta' ? '📊' : '📉';
+        const famLabel = fv.family === 'xg' ? 'xG' : fv.family === 'market' ? 'Market' : fv.family === 'meta' ? 'Meta' : 'Drops';
+        return `<div class="consensus-src ${agrees ? 'agrees' : 'disagrees'}" title="${fv.contributors.join(', ')}">
+          <div class="consensus-src-name">${famIcon} ${famLabel}</div>
+          <div class="consensus-src-pick" style="color:${agrees ? '#00e5a0' : '#f87171'};">${fv.pick}</div>
+          <div style="font-size:0.58rem;color:var(--text-dark);">${fv.prob}%</div>
+        </div>`;
+      }).join('');
+      
       return `<div class="consensus-panel">
-        <div style="font-size:0.62rem;color:var(--text-dark);text-align:center;">CONSENSUS ENGINE • ${consensus.totalSources} fonti analizzate</div>
+        <div style="font-size:0.62rem;color:var(--text-dark);text-align:center;">CONSENSUS ENGINE V8 • ${consensus.activeFamilies || consensus.totalSources} ${consensus.activeFamilies ? 'famiglie indipendenti' : 'fonti'}</div>
         <div class="consensus-pick" style="color:${consensus.confidenceColor};">🏆 ${consensus.pick}</div>
         <div class="consensus-confidence">
-          <span style="color:${consensus.confidenceColor};font-weight:800;">${consensus.confidence}</span> • Prob: ${consensus.prob}% • Accordo: ${consensus.agreement}% (${consensus.agreeSources}/${consensus.totalSources})
+          <span style="color:${consensus.confidenceColor};font-weight:800;">${consensus.confidence}</span> • Prob: ${consensus.prob}% • Famiglie d'accordo: ${consensus.winnerFamilies || consensus.agreeSources}/${consensus.activeFamilies || consensus.totalSources}
         </div>
         <div class="consensus-meter">
           <div class="consensus-meter-fill" style="width:${consensus.agreement}%;background:${consensus.confidenceColor};"></div>
         </div>
-        <div class="consensus-sources">${srcCards}</div>
-        ${consensus.alternatives.length > 0 ? `<div style="margin-top:8px;font-size:0.62rem;color:var(--text-dark);">Alternative: ${consensus.alternatives.map(a => a.pick + ' (' + a.sources + ' fonti, ' + a.prob + '%)').join(' • ')}</div>` : ''}
+        ${dropBadge}
+        <div class="consensus-sources" style="margin-top:8px;">${familyBadges || srcCards}</div>
+        ${consensus.alternatives.length > 0 ? `<div style="margin-top:8px;font-size:0.62rem;color:var(--text-dark);">Alternative: ${consensus.alternatives.map(a => a.pick + ' (' + a.sources + ' famiglie, ' + a.prob + '%)').join(' • ')}</div>` : ''}
       </div>`;
     }
 
@@ -12352,12 +12408,17 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             </div>
           </div>
           
-          <!-- MG CASA / MG OSPITE sotto risultato esatto previsto -->
+          <!-- MG CASA / MG OSPITE / MG GENERALE sotto risultato esatto previsto -->
           <div class="hero-mg-section">
             <div class="hero-mg-box">
               <div class="hero-mg-label">&#x1F3E0; MG ${m.home.name.split(' ')[0]}</div>
               <div class="hero-mg-value">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
               <div class="hero-mg-prob">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
+            </div>
+            <div class="hero-mg-box hero-mg-best" style="background:linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04));border:1px solid rgba(251,191,36,0.35);">
+              <div class="hero-mg-label" style="color:#fbbf24;">⭐ Best Multigol</div>
+              <div class="hero-mg-value" style="color:#fbbf24;">${d.multigoal && d.multigoal[0] ? d.multigoal[0].range : 'N/A'}</div>
+              <div class="hero-mg-prob" style="color:#fbbf24;">${d.multigoal && d.multigoal[0] ? d.multigoal[0].prob.toFixed(0) + '%' : '—'}${d.multigoal && d.multigoal[0] ? ' <span style="font-size:0.55rem;opacity:0.7;">@' + d.multigoal[0].quota + '</span>' : ''}</div>
             </div>
             <div class="hero-mg-box">
               <div class="hero-mg-label">✈️ MG ${m.away.name.split(' ')[0]}</div>
