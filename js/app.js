@@ -3195,13 +3195,6 @@
         motivationColor = 'gray';
       }
       
-      // === END-OF-SEASON CONTEXT ===
-      // Calcola moltiplicatori xG basati sulla situazione di classifica + tempo nella stagione.
-      // Una squadra "salva matematicamente" gioca diversamente da una che lotta per non retrocedere.
-      // Una squadra già qualificata Champions ruota i titolari nelle ultime giornate.
-      // Più si avvicina la fine, più questo effetto è marcato.
-      const endOfSeasonContext = calcEndOfSeasonContext(team, standings, totalTeams, position);
-
       return {
         position,
         totalTeams,
@@ -3214,7 +3207,7 @@
         goalsFor: team.all.goals.for,
         goalsAgainst: team.all.goals.against,
         goalDiff: team.goalsDiff,
-        // === split CASA / TRASFERTA ===
+        // === NUOVO: split CASA / TRASFERTA per dettaglio Squadre & Contesto ===
         home: team.home ? {
           played: team.home.played,
           won: team.home.win,
@@ -3233,241 +3226,7 @@
         } : null,
         motivation,
         motivationText,
-        motivationColor,
-        // === NUOVO: end of season context ===
-        endOfSeason: endOfSeasonContext
-      };
-    }
-
-    // ============================================================================
-    // END-OF-SEASON CONTEXT — calcola i moltiplicatori xG basati su classifica + tempo
-    // ============================================================================
-    // Considera questi scenari (verificati statisticamente in letteratura):
-    //
-    // 1) SALVA MATEMATICAMENTE (>10 punti dalla zona retrocessione, ultime 5 giornate):
-    //    → meno motivazione, gioca rilassata, +5% xG offensivo, -5% xG difensivo
-    //
-    // 2) ZONA RETROCESSIONE LOTTA APERTA (ultime 5 giornate, posizione precaria):
-    //    → catenaccio, gioco difensivo, -8% xG offensivo, -8% xG difensivo (subisce meno)
-    //    Nota: il -8% sul difensivo qui significa "concede meno" (catenaccio funziona)
-    //
-    // 3) GIÀ QUALIFICATA CHAMPIONS (top 4 con >5 punti su 5°, ultime 3 giornate):
-    //    → rotazioni, riposo titolari, -10% xG globale (squadra sceglie partite dove giocare seria)
-    //
-    // 4) LOTTA SCUDETTO/CHAMPIONS APERTA (entro 3 punti dal target, ultime 5 giornate):
-    //    → massima intensità, +8% xG offensivo (arrembaggio), -3% xG difensivo (più rischi)
-    //
-    // 5) METÀ CLASSIFICA SENZA OBIETTIVI (ultime 5 giornate, salva ma fuori da Europa):
-    //    → "passerella", -5% intensità globale
-    //
-    // 6) NORMALE (default, prima parte stagione o nessun caso speciale):
-    //    → moltiplicatori = 1.0 (nessun effetto)
-    //
-    // Output: {xgOffMult, xgDefMult, contextLabel, contextActive}
-    function calcEndOfSeasonContext(team, standings, totalTeams, position) {
-      const result = {
-        xgOffMult: 1.0,
-        xgDefMult: 1.0,
-        contextLabel: '',
-        contextActive: false,
-        details: ''
-      };
-
-      try {
-        const playedMatches = team.all.played || 0;
-        // Stima totale partite stagione: più alto tra (played * 2) e 38 (lega standard)
-        // poi clamp per leghe corte (es. Champions ha solo 6-8 partite di gruppi)
-        const estimatedTotalMatches = Math.max(playedMatches, 30);
-        const matchesRemaining = Math.max(0, estimatedTotalMatches - playedMatches);
-
-        // Se mancano più di 8 partite, end-of-season effect non attivo (siamo a mezza stagione)
-        if (matchesRemaining > 8) return result;
-
-        const isLateSeason = matchesRemaining <= 5;
-        const isVeryLateSeason = matchesRemaining <= 3;
-
-        // Calcola distanza punti dalla zona retrocessione
-        const lastSafePosition = totalTeams - 3;
-        const teamAtLastSafe = standings.find(s => s.rank === lastSafePosition);
-        const pointsFromRelegationZone = teamAtLastSafe ? (team.points - teamAtLastSafe.points) : 0;
-
-        // Calcola distanza punti dalla zona Champions (top 4)
-        const teamAtFifth = standings.find(s => s.rank === 5);
-        const pointsFromChampionsZone = teamAtFifth ? (team.points - teamAtFifth.points) : 0;
-
-        // Calcola distanza dal primo posto
-        const teamFirst = standings.find(s => s.rank === 1);
-        const pointsFromFirst = teamFirst ? (teamFirst.points - team.points) : 999;
-
-        // Punti massimi ancora ottenibili
-        const maxPointsObtainable = matchesRemaining * 3;
-
-        // ===== SCENARIO 1: Squadra già SALVA matematicamente =====
-        // Posizione media classifica + distanza dalla retrocessione > punti ottenibili dalle ultime in classifica
-        const teamInRelegation = standings.find(s => s.rank === totalTeams);
-        const maxPointsForLastTeam = teamInRelegation ? (teamInRelegation.points + maxPointsObtainable) : 0;
-        const isMathematicallySafe = (team.points > maxPointsForLastTeam) && (position < lastSafePosition);
-
-        if (isMathematicallySafe && isLateSeason && position > 8) {
-          result.xgOffMult = 1.05; // Gioca più rilassata
-          result.xgDefMult = 1.05; // Concede di più (meno motivazione difensiva)
-          result.contextLabel = '😌 Squadra salva';
-          result.contextActive = true;
-          result.details = 'Salvezza matematica raggiunta. Gioca con minore intensità.';
-          return result;
-        }
-
-        // ===== SCENARIO 2: Lotta retrocessione APERTA =====
-        const inRelegationFight = (position >= lastSafePosition - 1) || (pointsFromRelegationZone <= 4 && pointsFromRelegationZone > -6);
-        if (inRelegationFight && isLateSeason) {
-          result.xgOffMult = 0.92; // Gioca contratta, meno offensiva
-          result.xgDefMult = 0.92; // Difesa più chiusa, concede meno
-          result.contextLabel = '🔥 Lotta salvezza';
-          result.contextActive = true;
-          result.details = 'Lotta retrocessione aperta. Catenaccio, partite tese.';
-          return result;
-        }
-
-        // ===== SCENARIO 3: Già qualificata Champions =====
-        const isChampionsLocked = (position <= 3) && (pointsFromChampionsZone >= 6) && isVeryLateSeason;
-        if (isChampionsLocked) {
-          result.xgOffMult = 0.92; // Rotazioni, titolari riposano
-          result.xgDefMult = 0.92; // Anche difesa rotazione
-          result.contextLabel = '🛏️ Champions assicurata';
-          result.contextActive = true;
-          result.details = 'Qualificazione Champions garantita. Rotazioni titolari.';
-          return result;
-        }
-
-        // ===== SCENARIO 4: Lotta scudetto/Champions APERTA =====
-        const inTitleFight = (position <= 2) && (Math.abs(pointsFromFirst) <= 3) && isLateSeason;
-        const inChampionsFight = (position >= 4 && position <= 7) && (Math.abs(pointsFromChampionsZone) <= 3) && isLateSeason;
-        if (inTitleFight || inChampionsFight) {
-          result.xgOffMult = 1.08; // Massima intensità offensiva
-          result.xgDefMult = 0.97; // Prende qualche rischio in più (meno catenaccio)
-          result.contextLabel = inTitleFight ? '🏆 Lotta Scudetto' : '⭐ Lotta Champions';
-          result.contextActive = true;
-          result.details = 'Match decisivo per ' + (inTitleFight ? 'lo scudetto' : 'la qualificazione Champions') + '. Massima intensità.';
-          return result;
-        }
-
-        // ===== SCENARIO 5: Metà classifica senza obiettivi =====
-        const noObjectives = (position >= 8) && (position <= totalTeams - 5) && isLateSeason && isMathematicallySafe;
-        if (noObjectives) {
-          result.xgOffMult = 0.95; // Passerella, meno intensità
-          result.xgDefMult = 1.05; // Difesa meno concentrata
-          result.contextLabel = '🚶 Senza obiettivi';
-          result.contextActive = true;
-          result.details = 'Salva, niente da chiedere alla stagione. Match passerella.';
-          return result;
-        }
-
-      } catch(e) {
-        console.warn('calcEndOfSeasonContext error:', e);
-      }
-
-      return result;
-    }
-
-    // ============================================================================
-    // LEAGUE QUALITY — classifica la qualità dei dati API per la lega del match
-    // ============================================================================
-    // Diverse leghe hanno diversa qualità di dati statistici:
-    // - Leghe TOP (PL, Serie A, La Liga, Bundesliga, Ligue 1, Champions): xG molto predittivo, dati ricchi
-    // - Leghe MEDIE (Serie B, Championship, MLS, leghe nordiche): xG ok, dati decenti
-    // - Leghe MINORI (paesi minori, riserve, amichevoli): xG poco affidabile, dati sparsi
-    //
-    // Su leghe minori il modello deve:
-    //   - Pesare meno l'xG/Poisson (che è meno predittivo)
-    //   - Fidarsi DI PIÙ delle quote bookmaker (che sono comunque calibrate dal mercato)
-    //   - Mostrare un disclaimer "Dati Limitati" all'utente per evitare false confidence
-    //
-    // Output: { quality: 'high'/'medium'/'low', label, weights, warning }
-    function getLeagueQuality(match) {
-      // Liste basate sull'ID League di API-Football
-      // Documentate qui: https://www.api-football.com/documentation-v3#operation/get-leagues
-      const HIGH_QUALITY_LEAGUES = [
-        // Top 5 europei
-        39,  // Premier League
-        140, // La Liga
-        135, // Serie A
-        78,  // Bundesliga
-        61,  // Ligue 1
-        // Coppe europee maggiori
-        2,   // UEFA Champions League
-        3,   // UEFA Europa League
-        848, // UEFA Conference League
-        // Mondiali ed Europei (quando attivi)
-        1,   // World Cup
-        4,   // Euro Championship
-        9,   // Copa America
-      ];
-      const MEDIUM_QUALITY_LEAGUES = [
-        // Seconde divisioni top
-        40,  // Championship (Inghilterra)
-        136, // Serie B (Italia)
-        141, // Segunda Division (Spagna)
-        79,  // 2. Bundesliga
-        62,  // Ligue 2
-        // Top divisioni "medie"
-        88,  // Eredivisie (Olanda)
-        94,  // Primeira Liga (Portogallo)
-        144, // Jupiler Pro League (Belgio)
-        203, // Süper Lig (Turchia)
-        253, // MLS
-        71,  // Brasileirao Serie A
-        128, // Argentina Primera
-        // Leghe nordiche / minori europee con buoni dati
-        103, // Eliteserien (Norvegia)
-        113, // Allsvenskan (Svezia)
-        119, // Superligaen (Danimarca)
-        // Coppe nazionali principali
-        45,  // FA Cup
-        137, // Coppa Italia
-        143, // Copa del Rey
-        66,  // Coupe de France
-        81,  // DFB-Pokal
-      ];
-
-      const leagueId = match?.league?.id;
-      const leagueName = (match?.league?.name || '').toLowerCase();
-
-      // Match per ID
-      if (HIGH_QUALITY_LEAGUES.includes(leagueId)) {
-        return {
-          quality: 'high',
-          label: '✅ Lega Top',
-          weights: { poisson: 1.0, bookmaker: 1.0, regression: 1.0, superAI: 1.0 },
-          warning: null
-        };
-      }
-      if (MEDIUM_QUALITY_LEAGUES.includes(leagueId)) {
-        return {
-          quality: 'medium',
-          label: '🟡 Lega Standard',
-          weights: { poisson: 0.85, bookmaker: 1.10, regression: 0.95, superAI: 0.90 },
-          warning: null
-        };
-      }
-
-      // Pattern matching su nome lega per casi non in lista
-      // Riserve, U23, U21, Amichevoli, Reserve League → bassa qualità
-      const lowQualityPatterns = ['reserve', 'u23', 'u21', 'u20', 'u19', 'youth', 'friendly', 'club friendlies', 'amichevole', 'primavera'];
-      if (lowQualityPatterns.some(p => leagueName.includes(p))) {
-        return {
-          quality: 'low',
-          label: '⚠️ Dati Limitati',
-          weights: { poisson: 0.60, bookmaker: 1.30, regression: 0.70, superAI: 0.70 },
-          warning: 'Lega con dati statistici limitati. Affidabilità ridotta del modello.'
-        };
-      }
-
-      // Default per leghe non classificate (es. Algeria Ligue 1, Bahrain Premier, ecc.)
-      return {
-        quality: 'low',
-        label: '⚠️ Dati Limitati',
-        weights: { poisson: 0.70, bookmaker: 1.20, regression: 0.80, superAI: 0.80 },
-        warning: 'Lega con copertura dati ridotta. Le quote bookmaker pesano più del modello.'
+        motivationColor
       };
     }
 
@@ -4085,42 +3844,6 @@
         if (homeData.goalsFor > awayData.goalsFor) h *= 1.06;
         else a *= 1.06;
       }
-
-      // ============================================================================
-      // STYLISTIC FACTORS — fattori stilistici aggiunti per migliorare l'accuratezza
-      // ============================================================================
-      // Letteratura statistica (analisi xCorner di FBref/StatsBomb) mostra che i corner
-      // dipendono molto dallo STILE di gioco oltre che dai numeri grezzi.
-
-      // 11. SQUADRA DOMINANTE vs CATENACCIO: una squadra che attacca contro una "parcheggiata"
-      // genera corner extra perché blocca la palla negli ultimi 30 metri avversari.
-      // Indicatori: la dominante ha xG molto > avversario E avversario è difensivo (CS alto).
-      const homeIsDominantVsParked = (homeData.goalsFor >= awayData.goalsFor + 0.6) &&
-                                       (awayData.cleanSheetPct >= 30) &&
-                                       (awayData.goalsAgainst <= 1.0);
-      const awayIsDominantVsParked = (awayData.goalsFor >= homeData.goalsFor + 0.6) &&
-                                       (homeData.cleanSheetPct >= 30) &&
-                                       (homeData.goalsAgainst <= 1.0);
-      if (homeIsDominantVsParked) h *= 1.10;  // +10% corner per dominante che gioca contro chiusi
-      if (awayIsDominantVsParked) a *= 1.08;
-
-      // 12. PARTITE A "PALLA LUNGA" / SCUOLA INGLESE: squadre che fanno tanti tiri (alta intensità
-      // offensiva) ma SoT rate bassa = molti rebound, palloni che escono in corner.
-      // Approssimazione: alti gol fatti + clean sheet basso (squadra che subisce molto) = stile aperto
-      const homeOpenStyle = (homeData.goalsFor >= 1.8) && (homeData.cleanSheetPct <= 25);
-      const awayOpenStyle = (awayData.goalsFor >= 1.6) && (awayData.cleanSheetPct <= 25);
-      if (homeOpenStyle) h *= 1.05;
-      if (awayOpenStyle) a *= 1.05;
-
-      // 13. UNDERDOG IN CASA CON FORTI DAVANTI: squadre che subiscono ma che non rinunciano ad
-      // attaccare. Generano corner difensivi (subiti) ma anche offensivi.
-      // Effetto netto: sui corner totali poco cambia, ma asimmetria leggera.
-      const homeUnderdogActive = (homeData.goalsFor >= 1.4) && (homeData.goalsAgainst >= 1.6);
-      if (homeUnderdogActive && awayData.goalsFor >= 1.7) {
-        // Partita potenzialmente aperta - boost simmetrico modesto
-        h *= 1.03;
-        a *= 1.03;
-      }
       
       h = clamp(2.0, h, 10.0);
       a = clamp(1.5, a, 9.0);
@@ -4147,65 +3870,8 @@
       return { home: h, away: a, total, probs };
     }
     
-    // ============================================================================
-    // DATABASE ARBITRI — moltiplicatori cartellini per arbitri italiani Serie A/B
-    // ============================================================================
-    // Valori basati su statistiche pubbliche (DAZN, Lega Serie A, Football-Italia).
-    // Moltiplicatore: 1.0 = media campionato, > 1.0 = arbitro più severo, < 1.0 = più permissivo.
-    //
-    // Fonte: medie cartellini stagione 2024/25 confrontate con la media campionato (~4.2 gialli/match).
-    // I valori sono CONSERVATIVI: il moltiplicatore va da 0.85 a 1.25 per evitare sovra-correzioni.
-    //
-    // NB: per arbitri non in lista, restituiamo 1.0 (neutrale). L'utente vede comunque l'arbitro
-    // ma il modello non ne tiene conto.
-    const REFEREE_CARDS_MULTIPLIER = {
-      // === SEVERI (più cartellini della media) ===
-      'Mariani': 1.20,      // Maurizio Mariani — fra i più severi
-      'Pairetto': 1.18,     // Luca Pairetto
-      'Sozza': 1.15,        // Simone Sozza
-      'Massa': 1.13,        // Davide Massa
-      'Di Bello': 1.12,     // Marco Di Bello
-      'Marcenaro': 1.11,    // Matteo Marcenaro
-      'Marchetti': 1.10,    // Gianluca Marchetti
-      'Manganiello': 1.10,  // Gianluca Manganiello
-      'Doveri': 1.09,       // Daniele Doveri
-      'Abisso': 1.08,       // Rosario Abisso
-      'Maresca': 1.07,      // Fabio Maresca
-      'Aureliano': 1.07,    // Gianluca Aureliano
-
-      // === MEDI (vicini alla media) ===
-      'Orsato': 1.04,       // Daniele Orsato — esperto, equilibrato
-      'Guida': 1.03,        // Marco Guida
-      'La Penna': 1.02,     // Federico La Penna
-      'Piccinini': 1.00,    // Marco Piccinini
-      'Fourneau': 1.00,     // Francesco Fourneau
-      'Chiffi': 1.00,       // Daniele Chiffi
-      'Colombo': 0.99,      // Andrea Colombo
-
-      // === PERMISSIVI (meno cartellini della media) ===
-      'Rapuano': 0.92,      // Antonio Rapuano — fra i più permissivi
-      'Fabbri': 0.90,       // Michael Fabbri
-      'Sacchi': 0.94,       // Juan Luca Sacchi
-      'Ayroldi': 0.93,      // Antonio Ayroldi
-      'Prontera': 0.95,     // Matteo Prontera
-      'Zufferli': 0.96,     // Daniele Zufferli
-    };
-
-    // Cerca match parziale del nome arbitro (l'API può restituire "Daniele Orsato" o "M. Mariani")
-    function getRefereeMultiplier(refereeName) {
-      if (!refereeName || typeof refereeName !== 'string') return { mult: 1.0, name: null, found: false };
-      const normalized = refereeName.trim();
-      // Match esatto sul cognome
-      for (const lastName in REFEREE_CARDS_MULTIPLIER) {
-        if (normalized.toLowerCase().includes(lastName.toLowerCase())) {
-          return { mult: REFEREE_CARDS_MULTIPLIER[lastName], name: lastName, found: true };
-        }
-      }
-      return { mult: 1.0, name: normalized, found: false };
-    }
-
-    function calcCards(homeData, awayData, fsMatch, refereeName) {
-      // Base: media cartellini per squadra (ora valori reali da API, ~1.5-2.8 per Serie A)
+    function calcCards(homeData, awayData, fsMatch) {
+      // Base: media cartellini per squadra
       let h = homeData.cards || 2.1;
       let a = awayData.cards || 1.9;
       
@@ -4215,104 +3881,99 @@
         if (fsMatch.away_cards) a = fsMatch.away_cards;
       }
       
-      // ============================================================================
-      // RICALIBRAZIONE — i fattori sono stati attenuati dopo il fix dei dati reali
-      // ============================================================================
-      // Prima il modello partiva da 1.8 universale (bug) e i fattori erano calibrati per
-      // amplificare verso valori realistici. Ora che la base è già reale (es. 2.12 per Bologna),
-      // i fattori sono volutamente più CONSERVATIVI per evitare sovrastime a cascata.
-      // Target totale partita: 4.0-5.5 cartellini per Serie A (media reale stagione).
+      // MIGLIORAMENTO AVANZATO: 12+ fattori che influenzano i cartellini
       
-      // 1. Squadre sotto pressione (subiscono gol) → Più falli disperati
-      if (homeData.goalsAgainst >= 2.5) h *= 1.10;
-      else if (homeData.goalsAgainst >= 2.0) h *= 1.07;
-      else if (homeData.goalsAgainst >= 1.5) h *= 1.04;
+      // 1. Squadre sotto pressione (subiscono gol) → Più falli disperati → Più cartellini (graduale)
+      if (homeData.goalsAgainst >= 2.5) h *= 1.18;
+      else if (homeData.goalsAgainst >= 2.0) h *= 1.14;
+      else if (homeData.goalsAgainst >= 1.5) h *= 1.10;
+      else if (homeData.goalsAgainst >= 1.2) h *= 1.05;
       
-      if (awayData.goalsAgainst >= 2.8) a *= 1.12;
-      else if (awayData.goalsAgainst >= 2.2) a *= 1.08;
-      else if (awayData.goalsAgainst >= 1.8) a *= 1.05;
+      if (awayData.goalsAgainst >= 2.8) a *= 1.22; // Ospite subisce molto (in trasferta è peggio)
+      else if (awayData.goalsAgainst >= 2.2) a *= 1.16;
+      else if (awayData.goalsAgainst >= 1.8) a *= 1.12;
+      else if (awayData.goalsAgainst >= 1.4) a *= 1.07;
       
-      // 2. Squadre offensive aggressive (molti gol + molti subiti)
-      if (homeData.goalsFor >= 2.5 && homeData.goalsAgainst >= 1.8) h *= 1.06;
-      else if (homeData.goalsFor >= 2.0 && homeData.goalsAgainst >= 1.3) h *= 1.04;
-      if (awayData.goalsFor >= 2.2 && awayData.goalsAgainst >= 2.0) a *= 1.07;
-      else if (awayData.goalsFor >= 1.8 && awayData.goalsAgainst >= 1.5) a *= 1.04;
+      // 2. Squadre offensive aggressive (molti gol + molti subiti = partite intense = più falli)
+      if (homeData.goalsFor >= 2.5 && homeData.goalsAgainst >= 1.8) h *= 1.12;
+      else if (homeData.goalsFor >= 2.0 && homeData.goalsAgainst >= 1.3) h *= 1.08;
+      if (awayData.goalsFor >= 2.2 && awayData.goalsAgainst >= 2.0) a *= 1.14;
+      else if (awayData.goalsFor >= 1.8 && awayData.goalsAgainst >= 1.5) a *= 1.10;
       
-      // 3. Squadre difensive disciplinate
-      if (homeData.goalsFor <= 0.8 && homeData.goalsAgainst <= 0.8) h *= 0.85;
-      else if (homeData.goalsFor <= 1.0 && homeData.goalsAgainst <= 1.0) h *= 0.92;
-      if (awayData.goalsFor <= 0.7 && awayData.goalsAgainst <= 0.7) a *= 0.83;
-      else if (awayData.goalsFor <= 0.8 && awayData.goalsAgainst <= 0.8) a *= 0.90;
+      // 3. Squadre difensive disciplinate (pochi gol, pochi subiti = gioco controllato = meno falli)
+      if (homeData.goalsFor <= 0.8 && homeData.goalsAgainst <= 0.8) h *= 0.82;
+      else if (homeData.goalsFor <= 1.0 && homeData.goalsAgainst <= 1.0) h *= 0.88;
+      if (awayData.goalsFor <= 0.7 && awayData.goalsAgainst <= 0.7) a *= 0.80;
+      else if (awayData.goalsFor <= 0.8 && awayData.goalsAgainst <= 0.8) a *= 0.85;
       
-      // 4. Ritmo di gioco alto → Più cartellini (attenuato)
+      // 4. Ritmo di gioco alto → Più cartellini (graduale)
       const homeIntensity = homeData.goalsFor + homeData.goalsAgainst;
       const awayIntensity = awayData.goalsFor + awayData.goalsAgainst;
       
-      if (homeIntensity >= 4.0) h *= 1.05;
-      else if (homeIntensity >= 3.5) h *= 1.03;
-      if (awayIntensity >= 3.8) a *= 1.05;
-      else if (awayIntensity >= 3.2) a *= 1.03;
+      if (homeIntensity >= 4.0) h *= 1.10;
+      else if (homeIntensity >= 3.5) h *= 1.06;
+      if (awayIntensity >= 3.8) a *= 1.09;
+      else if (awayIntensity >= 3.2) a *= 1.05;
       
-      // 5. Partite equilibrate → Più tensione (attenuato)
+      // 5. Partite equilibrate (differenza xG bassa) → Più tensione → Più cartellini
       const balanceDiff = Math.abs(homeData.goalsFor - awayData.goalsFor);
       if (balanceDiff <= 0.2) {
-        h *= 1.05; a *= 1.05;
+        h *= 1.12; // Partita molto equilibrata = massima tensione
+        a *= 1.12;
       } else if (balanceDiff <= 0.3) {
-        h *= 1.03; a *= 1.03;
+        h *= 1.08;
+        a *= 1.08;
+      } else if (balanceDiff <= 0.5) {
+        h *= 1.04;
+        a *= 1.04;
       }
       
-      // 6. Fattore trasferta (attenuato da 1.08 a 1.04)
-      a *= 1.04;
+      // 6. Fattore trasferta: squadre ospiti tendono a fare più falli
+      a *= 1.08;
       
-      // 7. Derby / Rivalità (soglie alzate per evitare false attivazioni)
-      // PRIMA: scattava facilmente perché valori sempre alti per il bug
-      // ORA: scatta solo per squadre davvero "fisiche" (>2.5 gialli/match REALI)
-      if (h >= 2.7 && a >= 2.5) {
-        h *= 1.06; a *= 1.06;
+      // 7. Derby / Rivalità (se entrambe hanno alti cartellini medi)
+      if (h >= 2.5 && a >= 2.3) {
+        h *= 1.14; // Partita molto tesa
+        a *= 1.14;
+      } else if (h >= 2.3 && a >= 2.1) {
+        h *= 1.10;
+        a *= 1.10;
       }
       
-      // 8. Importanza partita (attenuato)
+      // 8. Importanza della partita (squadre forti = partite importanti = più tensione)
       if (homeData.goalsFor >= 2.0 && awayData.goalsFor >= 1.8) {
-        h *= 1.03; a *= 1.03;
+        h *= 1.06;
+        a *= 1.06;
+      } else if (homeData.goalsFor >= 1.8 && awayData.goalsFor >= 1.5) {
+        h *= 1.04;
+        a *= 1.04;
       }
       
-      // 9. Forma recente negativa → Più frustrazione (attenuato)
+      // 9. Forma recente negativa → Più frustrazione → Più falli
       const homeForm = (homeData.goalsFor / Math.max(homeData.goalsAgainst, 0.5));
       const awayForm = (awayData.goalsFor / Math.max(awayData.goalsAgainst, 0.5));
       
-      if (homeForm <= 0.5) h *= 1.05;
-      else if (homeForm <= 0.7) h *= 1.02;
-      if (awayForm <= 0.4) a *= 1.06;
-      else if (awayForm <= 0.6) a *= 1.03;
+      if (homeForm <= 0.5) h *= 1.08; // Casa in crisi
+      else if (homeForm <= 0.7) h *= 1.04;
+      if (awayForm <= 0.4) a *= 1.10; // Ospite in crisi
+      else if (awayForm <= 0.6) a *= 1.05;
       
-      // 10. Win rate basso (attenuato)
-      if (homeData.winRate && homeData.winRate <= 25) h *= 1.04;
-      else if (homeData.winRate && homeData.winRate <= 35) h *= 1.02;
-      if (awayData.winRate && awayData.winRate <= 20) a *= 1.05;
-      else if (awayData.winRate && awayData.winRate <= 30) a *= 1.02;
+      // 10. Win rate basso → Squadre perdenti fanno più falli per disperazione
+      if (homeData.winRate && homeData.winRate <= 25) h *= 1.08;
+      else if (homeData.winRate && homeData.winRate <= 35) h *= 1.04;
+      if (awayData.winRate && awayData.winRate <= 20) a *= 1.10;
+      else if (awayData.winRate && awayData.winRate <= 30) a *= 1.05;
       
-      // 11. Squadre veloci vs lente (attenuato)
-      if (homeData.goalsFor >= 2.0 && awayData.goalsFor <= 1.0) a *= 1.03;
-      if (awayData.goalsFor >= 1.8 && homeData.goalsFor <= 1.0) h *= 1.03;
+      // 11. Squadre veloci (molti gol) vs squadre lente (pochi gol) = più falli per fermare contropiede
+      if (homeData.goalsFor >= 2.0 && awayData.goalsFor <= 1.0) a *= 1.06;
+      if (awayData.goalsFor >= 1.8 && homeData.goalsFor <= 1.0) h *= 1.05;
       
-      // 12. Clean sheet basso (attenuato)
-      if (homeData.cleanSheetPct && homeData.cleanSheetPct <= 20) h *= 1.03;
-      if (awayData.cleanSheetPct && awayData.cleanSheetPct <= 15) a *= 1.03;
+      // 12. Clean sheet basso = difese che subiscono pressione = più falli
+      if (homeData.cleanSheetPct && homeData.cleanSheetPct <= 20) h *= 1.05;
+      if (awayData.cleanSheetPct && awayData.cleanSheetPct <= 15) a *= 1.06;
       
-      // === FATTORE ARBITRO ===
-      // Se l'arbitro è nel database, applica il moltiplicatore severità.
-      // L'effetto è simmetrico (entrambe le squadre subiscono lo stile dell'arbitro).
-      let refInfo = null;
-      if (refereeName) {
-        refInfo = getRefereeMultiplier(refereeName);
-        if (refInfo.found) {
-          h *= refInfo.mult;
-          a *= refInfo.mult;
-        }
-      }
-
-      h = clamp(1.0, h, 4.0);  // Clamp realistico per Serie A (max 4 cartellini per squadra)
-      a = clamp(0.8, a, 3.8);
+      h = clamp(1.0, h, 5.5);
+      a = clamp(0.8, a, 5.0);
       const total = h + a;
       
       const probs = {};
@@ -4333,7 +3994,7 @@
         };
       });
       
-      return { home: h, away: a, total, probs, refereeInfo: refInfo };
+      return { home: h, away: a, total, probs };
     }
 
     // === ANALYSIS ENGINE ===
@@ -4705,81 +4366,7 @@ async function analyzeMatch(match) {
     }
 
     // === ALGORITMO AVANZATO ===
-    // ============================================================================
-    // WEATHER EFFECT — modifica xG/corner se condizioni meteo estreme sono note
-    // ============================================================================
-    // Letteratura: pioggia battente riduce xG di ~8-12%, vento forte di ~5%, neve di ~15%.
-    // I corner aumentano del 15-20% in pioggia per palloni che scivolano e errori difensivi.
-    // I cartellini aumentano del 10% per scivolate "rischiose" sul bagnato.
-    //
-    // Sources for weather data (in ordine di preferenza):
-    //   1) match.fixture.weather (alcune leghe lo includono nativamente)
-    //   2) OpenWeatherMap API (free tier 60 calls/min) - NON ancora integrato
-    //   3) fallback: nessun aggiustamento
-    //
-    // Output: { xgMult, cornerMult, cardMult, condition, intensity }
-    function calcWeatherEffect(match) {
-      const result = {
-        xgMult: 1.0,
-        cornerMult: 1.0,
-        cardMult: 1.0,
-        condition: null,
-        intensity: 'normal',
-        active: false
-      };
-
-      try {
-        // Path 1: API-Football fixture.weather (raro ma esiste)
-        const weatherStr = (match?.fixture?.weather || match?.weather || '').toString().toLowerCase();
-        if (!weatherStr) return result;
-
-        // Pioggia
-        if (weatherStr.includes('heavy rain') || weatherStr.includes('thunderstorm') || weatherStr.includes('storm')) {
-          result.xgMult = 0.88;       // -12% gol
-          result.cornerMult = 1.18;   // +18% corner
-          result.cardMult = 1.10;     // +10% cartellini
-          result.condition = '🌧️ Pioggia battente';
-          result.intensity = 'severe';
-          result.active = true;
-        } else if (weatherStr.includes('rain') || weatherStr.includes('drizzle')) {
-          result.xgMult = 0.94;
-          result.cornerMult = 1.10;
-          result.cardMult = 1.05;
-          result.condition = '🌦️ Pioggia';
-          result.intensity = 'mild';
-          result.active = true;
-        }
-        // Neve
-        else if (weatherStr.includes('snow')) {
-          result.xgMult = 0.85;
-          result.cornerMult = 1.15;
-          result.cardMult = 1.08;
-          result.condition = '❄️ Neve';
-          result.intensity = 'severe';
-          result.active = true;
-        }
-        // Vento forte
-        else if (weatherStr.includes('strong wind') || weatherStr.includes('gale')) {
-          result.xgMult = 0.95;
-          result.cornerMult = 0.95; // tiri da fuori meno precisi → meno corner da rebound
-          result.condition = '💨 Vento forte';
-          result.intensity = 'mild';
-          result.active = true;
-        }
-        // Caldo estremo (>30°C peggiora la performance)
-        else if (weatherStr.includes('hot') || weatherStr.match(/3[0-9]\s*°|4[0-9]\s*°/)) {
-          result.xgMult = 0.96;       // -4% per stanchezza
-          result.condition = '🌡️ Caldo intenso';
-          result.intensity = 'mild';
-          result.active = true;
-        }
-      } catch(e) { /* silenzioso */ }
-
-      return result;
-    }
-
     function buildAnalysis(match, homeStats, awayStats, h2h, apiPred, fsMatch, homeForm, awayForm, extraData = {}) {
-
       const homeData = extractTeamData(homeStats, 'home');
       const awayData = extractTeamData(awayStats, 'away');
       
@@ -4824,7 +4411,7 @@ async function analyzeMatch(match) {
       
       // H2H adjustment
       if (h2h.length >= 3) {
-        const adj = analyzeH2H(h2h, match.home.id, match);
+        const adj = analyzeH2H(h2h, match.home.id);
         homeXG *= adj.homeMultiplier;
         awayXG *= adj.awayMultiplier;
       }
@@ -4846,44 +4433,13 @@ async function analyzeMatch(match) {
         else if (awayLosses >= 3) awayXG *= 0.92; // Pessima forma ospite
       }
       
-      // ============================================================================
-      // END-OF-SEASON CONTEXT MULTIPLIERS — aggiorna xG basandosi su classifica + tempo
-      // ============================================================================
-      // I dati di classifica vengono usati attivamente nelle ultime giornate per modulare l'xG.
-      // Una squadra già salva gioca rilassata, una in lotta retrocessione fa catenaccio,
-      // una qualificata Champions ruota i titolari. Effetto attivo solo nelle ultime 8 giornate.
-      try {
-        if (homePosition?.endOfSeason?.contextActive) {
-          const eos = homePosition.endOfSeason;
-          homeXG *= eos.xgOffMult;
-          // xgDefMult agisce sulla squadra avversaria (modula quanto subiscono)
-          awayXG *= eos.xgDefMult;
-          console.log('\uD83D\uDCC5 End-of-Season ' + match.home.name + ': ' + eos.contextLabel +
-            ' (xGoff x' + eos.xgOffMult + ', xGdef x' + eos.xgDefMult + ')');
-        }
-        if (awayPosition?.endOfSeason?.contextActive) {
-          const eos = awayPosition.endOfSeason;
-          awayXG *= eos.xgOffMult;
-          homeXG *= eos.xgDefMult;
-          console.log('\uD83D\uDCC5 End-of-Season ' + match.away.name + ': ' + eos.contextLabel +
-            ' (xGoff x' + eos.xgOffMult + ', xGdef x' + eos.xgDefMult + ')');
-        }
-      } catch(e) { console.warn('end-of-season xG modulation error:', e); }
-
+      // NOTA: Classifica e Infortuni sono mostrati come INFO ma NON modificano i calcoli
+      // per mantenere coerenza con i pronostici storici
+      
       // Home advantage (realistico: studi mostrano ~+6% casa, ~-5% trasferta)
       homeXG *= 1.06;  // +6% vantaggio casa (conservativo e realistico)
       awayXG *= 0.95;  // -5% svantaggio trasferta (conservativo e realistico)
-
-      // === WEATHER EFFECT ===
-      // Se il match ha info meteo (in fixture.weather o equivalente), applica i moltiplicatori.
-      // Pioggia/neve/vento riducono xG, aumentano corner e cartellini.
-      const weatherEffect = calcWeatherEffect(match);
-      if (weatherEffect.active) {
-        homeXG *= weatherEffect.xgMult;
-        awayXG *= weatherEffect.xgMult;
-        console.log('🌤️ Weather effect: ' + weatherEffect.condition + ' (xG x' + weatherEffect.xgMult.toFixed(2) + ')');
-      }
-
+      
       // Validazione anti-NaN e valori negativi
       if (isNaN(homeXG) || homeXG < 0) homeXG = 1.2;
       if (isNaN(awayXG) || awayXG < 0) awayXG = 1.0;
@@ -4932,46 +4488,7 @@ async function analyzeMatch(match) {
       
       // Corners & Cards
       const corners = calcCorners(homeData, awayData, fsMatch);
-      // Cartellini: passa il nome dell'arbitro per applicare il moltiplicatore severità
-      const refereeName = match?.fixture?.referee || match?.referee || null;
-      const cards = calcCards(homeData, awayData, fsMatch, refereeName);
-
-      // === Applica weather effect a corner e cards (post-processing) ===
-      if (weatherEffect.active) {
-        if (weatherEffect.cornerMult !== 1.0 && corners) {
-          corners.home *= weatherEffect.cornerMult;
-          corners.away *= weatherEffect.cornerMult;
-          corners.total = corners.home + corners.away;
-          // Ricalcola probs con nuovo total
-          if (corners.probs) {
-            [8.5, 9.5, 10.5, 11.5].forEach(line => {
-              let pOver = 0;
-              for (let i = 0; i <= 20; i++) {
-                const pCorners = (Math.pow(corners.total, i) * Math.exp(-corners.total)) / factorial(i);
-                if (i > line) pOver += pCorners;
-              }
-              pOver *= 100;
-              corners.probs[line] = { over: clamp(15, pOver, 85), under: clamp(15, 100 - pOver, 85) };
-            });
-          }
-        }
-        if (weatherEffect.cardMult !== 1.0 && cards) {
-          cards.home *= weatherEffect.cardMult;
-          cards.away *= weatherEffect.cardMult;
-          cards.total = cards.home + cards.away;
-          if (cards.probs) {
-            [2.5, 3.5, 4.5, 5.5].forEach(line => {
-              let pOver = 0;
-              for (let i = 0; i <= 12; i++) {
-                const pCards = (Math.pow(cards.total, i) * Math.exp(-cards.total)) / factorial(i);
-                if (i > line) pOver += pCards;
-              }
-              pOver *= 100;
-              cards.probs[line] = { over: clamp(18, pOver, 82), under: clamp(18, 100 - pOver, 82) };
-            });
-          }
-        }
-      }
+      const cards = calcCards(homeData, awayData, fsMatch);
       
       // Build predictions
       const predictions = buildPredictions(match, homeXG, awayXG, p1X2, pOU, pBTTS, exactScores, corners, cards);
@@ -5042,9 +4559,7 @@ async function analyzeMatch(match) {
         lineupsAvailable: lineupsAvailable || false,
         bookmakerOdds: bookmakerOdds || null,
         homeFatigue: homeFatigue || 1.0,
-        awayFatigue: awayFatigue || 1.0,
-        // === NUOVO: weather effect (può essere null se nessuna condizione attiva) ===
-        weatherEffect: weatherEffect.active ? weatherEffect : null
+        awayFatigue: awayFatigue || 1.0
       };
     }
 
@@ -5073,58 +4588,16 @@ async function analyzeMatch(match) {
         ((side === 'home' ? stats.clean_sheet.home : stats.clean_sheet.away) || stats.clean_sheet.total || 0) / played * 100 : 25;
       const failedToScorePct = stats.failed_to_score && played > 0 ?
         ((side === 'home' ? stats.failed_to_score.home : stats.failed_to_score.away) || stats.failed_to_score.total || 0) / played * 100 : 25;
-
-      // === CARTELLINI REALI ===
-      // BUG FIX v3: i cartellini stagionali (stats.cards.yellow per fasce minute) sono
-      // AGGREGATI SU TUTTA LA STAGIONE (casa + trasferta), non solo casa o solo trasferta.
-      // Quindi devono essere divisi per il TOTALE di partite giocate, non solo home/away.
-      // 
-      // Esempio Bologna: 59 gialli totali stagione, played.total = 34 (17 casa + 17 trasferta)
-      //   Corretto: 59 / 34 = 1.74 gialli/match
-      //   Errato: 59 / 17 = 3.47 (raddoppia)
-      const playedTotal = fixtures.played?.total || (played * 2) || 20;
-
-      let totalYellow = 0, totalRed = 0;
-      try {
-        const yellowBuckets = stats.cards?.yellow || {};
-        Object.entries(yellowBuckets).forEach(([key, bucket]) => {
-          // Solo chiavi formato "N-M" (fasce minuto valide)
-          if (/^\d+-\d+$/.test(key) && bucket && typeof bucket.total === 'number') {
-            totalYellow += bucket.total;
-          }
-        });
-        const redBuckets = stats.cards?.red || {};
-        Object.entries(redBuckets).forEach(([key, bucket]) => {
-          if (/^\d+-\d+$/.test(key) && bucket && typeof bucket.total === 'number') {
-            totalRed += bucket.total;
-          }
-        });
-      } catch(e) { /* fallback a default */ }
-
-      // Cartellini medi per match: gialli + rossi pesati 2x, divisi per partite TOTALI stagione
-      const cardsPerMatch = (playedTotal > 0 && totalYellow > 0)
-        ? (totalYellow + totalRed * 2) / playedTotal
-        : 1.8; // fallback se dati assenti
-
-      // NOTA: API-Football `team/statistics` NON restituisce shots aggregati per stagione.
-      // Verificato sul campo: il payload contiene solo goals, fixtures, cards, lineups, clean_sheet,
-      // failed_to_score, biggest, penalty. I shots per stagione richiederebbero N chiamate
-      // /fixtures/statistics e aggregazione manuale (insostenibile con quota API).
-      // Il modello tiri usa quindi i dati derivati (goalsFor, cleanSheetPct, winRate).
-
+      
       return {
         goalsFor: parseFloat(forAvg) || 1.3,
         goalsAgainst: parseFloat(againstAvg) || 1.2,
         form: stats.form || 'DDDDD',
         corners: 5.0,
-        cards: cardsPerMatch,
-        // Espongo anche i raw per uso futuro (es. distribuzione cartellini per minuto)
-        totalYellowSeason: totalYellow,
-        totalRedSeason: totalRed,
+        cards: parseFloat(stats.cards?.yellow?.total) / (played || 1) || 1.8,
         cleanSheetPct: cleanSheetPct || 25,
         failedToScorePct: failedToScorePct || 25,
         played, wins, draws, losses,
-        matchesPlayed: played,
         winRate: played > 0 ? (wins / played) * 100 : 40
       };
     }
@@ -5205,107 +4678,38 @@ async function analyzeMatch(match) {
       return 0.80 + (avgScore * 0.40);
     }
 
-    // ============================================================================
-    // ANALYZE H2H — analisi degli scontri diretti con filtri intelligenti
-    // ============================================================================
-    // Migliorie rispetto alla versione precedente:
-    //
-    // 1) FILTRO SAME-LEAGUE: scarta H2H di coppe nazionali quando il match attuale è di
-    //    campionato (e viceversa). Una sfida di Coppa Italia ha intensità diversa da Serie A.
-    //
-    // 2) FILTRO HOME/AWAY: dà PESO MAGGIORE agli H2H giocati nello stesso campo.
-    //    Vincere in trasferta contro X non significa vincere in casa contro X (e viceversa).
-    //
-    // 3) DECAY ESPONENZIALE PIÙ AGGRESSIVO: gli H2H di 3+ anni fa pesano poco.
-    //    Le rose cambiano completamente in 3 anni, l'allenatore cambia, lo stile cambia.
-    //
-    // 4) MAX 5 H2H più recenti: oltre questo numero, statisticamente l'informazione decade.
-    function analyzeH2H(h2h, homeId, currentMatch) {
-      if (!h2h || h2h.length === 0) return { homeMultiplier: 1.0, awayMultiplier: 1.0, info: null };
-
-      const currentLeagueId = currentMatch?.league?.id;
-      const currentSeason = currentMatch?.league?.season || new Date().getFullYear();
-
-      // === Step 1: filtra per stessa lega quando applicabile ===
-      // Se la lega corrente è classificata e abbiamo abbastanza H2H, scartiamo le coppe.
-      let filtered = h2h;
-      if (currentLeagueId) {
-        const sameLeague = h2h.filter(m => m.league?.id === currentLeagueId);
-        // Manteniamo il filtro solo se rimangono almeno 3 H2H "puri" — altrimenti usiamo tutto
-        if (sameLeague.length >= 3) filtered = sameLeague;
-      }
-
-      // === Step 2: ordina per data decrescente e prendi max 5 più recenti ===
-      filtered = filtered
-        .filter(m => m.fixture?.date || m.date) // solo H2H con data valida
-        .sort((a, b) => {
-          const dateA = new Date(a.fixture?.date || a.date).getTime();
-          const dateB = new Date(b.fixture?.date || b.date).getTime();
-          return dateB - dateA;
-        })
-        .slice(0, 5);
-
-      if (filtered.length === 0) return { homeMultiplier: 1.0, awayMultiplier: 1.0, info: null };
-
-      // === Step 3: calcolo pesato con decay esponenziale + bonus stesso campo ===
+    function analyzeH2H(h2h, homeId) {
+      if (!h2h || h2h.length === 0) return { homeMultiplier: 1.0, awayMultiplier: 1.0 };
+      
       let hg = 0, ag = 0, totalWeight = 0;
-      let sameVenueCount = 0;
-
-      filtered.forEach((m, index) => {
-        // Recency decay: peso 1.0 per la più recente, 0.85^index per le precedenti
-        let weight = Math.pow(0.85, index);
-
-        // Decay temporale aggiuntivo per H2H molto vecchi (>2 anni)
-        // Stagione corrente vs stagione H2H
-        const h2hSeason = m.league?.season || new Date(m.fixture?.date || m.date).getFullYear();
-        const seasonsAgo = Math.max(0, currentSeason - h2hSeason);
-        if (seasonsAgo >= 3) weight *= 0.5;       // Più di 3 anni fa: dimezza peso
-        else if (seasonsAgo >= 2) weight *= 0.7;  // 2 anni fa: -30%
-
-        // Bonus same-venue: se l'H2H si è giocato nello stesso campo del match attuale
-        // (cioè homeId casa anche nell'H2H), pesa di più
-        const h2hHomeId = m.teams?.home?.id;
-        const sameVenue = (h2hHomeId === homeId);
-        if (sameVenue) {
-          weight *= 1.30; // bonus 30% per H2H giocati con stessa "configurazione" home/away
-          sameVenueCount++;
-        } else {
-          weight *= 0.75; // penalty 25% se inverso (homeId era ospite in quell'H2H)
-        }
-
+      
+      h2h.forEach((m, index) => {
+        // Peso decrescente per partite più vecchie
+        const weight = Math.pow(0.85, index); // Partite recenti contano di più
         totalWeight += weight;
-
+        
         const homeGoals = m.goals?.home || 0;
         const awayGoals = m.goals?.away || 0;
-
-        if (h2hHomeId === homeId) {
+        
+        if (m.teams?.home?.id === homeId) {
           hg += homeGoals * weight;
           ag += awayGoals * weight;
         } else {
-          // Match invertito: prendi i gol di homeId che era ospite
           hg += awayGoals * weight;
           ag += homeGoals * weight;
         }
       });
-
+      
+      // Normalizza per il peso totale
       const avgHome = totalWeight > 0 ? hg / totalWeight : 1.2;
       const avgAway = totalWeight > 0 ? ag / totalWeight : 1.0;
       const avgTotal = (avgHome + avgAway) / 2;
-
-      // Calcola moltiplicatori (range conservativo 0.85-1.15)
+      
+      // Calcola moltiplicatori con range più ampio per H2H significativi
       const homeMultiplier = avgTotal > 0.1 ? clamp(0.85, avgHome / avgTotal, 1.15) : 1.0;
       const awayMultiplier = avgTotal > 0.1 ? clamp(0.85, avgAway / avgTotal, 1.15) : 1.0;
-
-      return {
-        homeMultiplier,
-        awayMultiplier,
-        info: {
-          totalH2H: h2h.length,
-          filteredH2H: filtered.length,
-          sameVenueCount,
-          sameLeagueOnly: filtered === h2h.filter(m => m.league?.id === currentLeagueId)
-        }
-      };
+      
+      return { homeMultiplier, awayMultiplier };
     }
 
     function summarizeH2H(h2h, homeId) {
@@ -7711,22 +7115,15 @@ async function analyzeMatch(match) {
     // ============================================================
     function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo) {
       if (!analysis) return null;
-
-      // === LEAGUE QUALITY: applica moltiplicatori ai pesi delle fonti ===
-      // Su leghe minori (Algeria, Bahrain, Reserve) il Poisson AI è meno affidabile,
-      // mentre i bookmaker (calibrati dal mercato) lo sono di più.
-      const leagueQ = getLeagueQuality(match);
-      const lqW = leagueQ.weights;
-
-      const sources = [];
-      const pickVotes = {}; // { 'pick': { count, totalWeight, sources } }
       
-      // Funzione helper per aggiungere un voto
-      function addVote(name, pick, prob, weight, icon) {
+      const sources = [];
+      const pickVotes = {}; // { 'pick': { count, totalWeight, sources } } — mantenuto per backward compat
+      
+      // Funzione helper per aggiungere un voto (ora con tag famiglia)
+      function addVote(name, pick, prob, weight, icon, family) {
         if (!pick || pick === 'N/A') return;
-        // Normalizza pick AGGRESSIVO — mappa tutte le varianti allo stesso pick canonico
         const normalizedPick = normalizePick(pick);
-        const src = { name, pick: normalizedPick, prob: parseFloat(prob) || 0, weight, icon };
+        const src = { name, pick: normalizedPick, prob: parseFloat(prob) || 0, weight, icon, family };
         sources.push(src);
         
         if (!pickVotes[normalizedPick]) pickVotes[normalizedPick] = { count: 0, totalWeight: 0, maxProb: 0, sources: [] };
@@ -7739,18 +7136,12 @@ async function analyzeMatch(match) {
       function normalizePick(raw) {
         if (!raw) return raw;
         const p = raw.trim().toLowerCase();
-        
-        // === Double Chance (PRIMA di X per evitare che "1x casa o pareggio" matchi "pareggio" → X) ===
         if (/^1x(\s|\(|$)/i.test(p) || p === '1x' || p.includes('casa o pareggio') || p.includes('1x (')) return '1X';
         if (/^x2(\s|\(|$)/i.test(p) || p === 'x2' || p.includes('pareggio o ospite') || p.includes('x2 (')) return 'X2';
         if (/^12(\s|$)/i.test(p) || p === '12' || p.includes('no pareggio')) return '12';
-        
-        // === 1X2 ===
         if (/^1(\s|\(|$)/.test(p) || p.includes('vittoria casa') || p.includes('casa vince') || p.includes('home win')) return '1';
         if (/^2(\s|\(|$)/.test(p) || p.includes('vittoria ospite') || p.includes('ospite vince') || p.includes('away win')) return '2';
         if (/^x(\s|\(|$)/.test(p) || p === 'pareggio' || p === 'x (pareggio)' || p === 'draw') return 'X';
-        
-        // === Over/Under ===
         if (/over\s*0\.?5/i.test(p)) return 'Over 0.5';
         if (/over\s*1\.?5/i.test(p)) return 'Over 1.5';
         if (/over\s*2\.?5/i.test(p)) return 'Over 2.5';
@@ -7759,94 +7150,170 @@ async function analyzeMatch(match) {
         if (/under\s*1\.?5/i.test(p)) return 'Under 1.5';
         if (/under\s*2\.?5/i.test(p)) return 'Under 2.5';
         if (/under\s*3\.?5/i.test(p)) return 'Under 3.5';
-        
-        // === GG/NG ===
         if (p === 'gg' || p.includes('gol gol') || p.includes('both teams') || p.includes('btts') || p.includes('entrambe segnano')) return 'GG';
         if (p === 'ng' || p === 'no gol' || p.includes('no gol') || p.includes('no goal')) return 'NG';
-        
-        // Fallback
         return raw.trim();
       }
       
-      // 1. Modello Poisson/Dixon-Coles (peso 3 × leagueQ)
-      if (ai && ai.pick) {
-        addVote('Poisson AI', ai.pick, ai.prob, 3 * lqW.poisson, '🎯');
-      }
+      // ============================================================
+      // RACCOLTA VOTI con TAG FAMIGLIA (3 famiglie indipendenti)
+      // ============================================================
       
-      // 2. Bookmaker consensus (peso 3 × leagueQ — su leghe minori pesa di più)
+      // FAMIGLIA xG — modelli predittivi statistici basati su Expected Goals
+      if (ai && ai.pick) addVote('Poisson AI', ai.pick, ai.prob, 3, '🎯', 'xg');
+      if (superAI && !superAI.error && superAI.bestPick) addVote('Oracle AI', superAI.bestPick, superAI.confidence || 60, 2, '🔮', 'xg');
+      if (superAlgo && superAlgo.topPick) addVote('Super Algo', superAlgo.topPick.value, superAlgo.topPick.prob, 2, '⚡', 'xg');
+      
+      // FAMIGLIA MARKET — segnali del mercato bookmaker
       if (oddsLab && oddsLab.consensus) {
         const c = oddsLab.consensus;
         const maxP = Math.max(c.home, c.draw, c.away);
         const bkPick = c.home === maxP ? '1' : (c.away === maxP ? '2' : 'X');
-        addVote('Bookmakers', bkPick, maxP, 3 * lqW.bookmaker, '💰');
+        addVote('Bookmakers', bkPick, maxP, 3, '💰', 'market');
       } else if (analysis.bookmakerOdds) {
         const b = analysis.bookmakerOdds;
         const maxP = Math.max(b.home, b.draw, b.away);
         const bkPick = b.home === maxP ? '1' : (b.away === maxP ? '2' : 'X');
-        addVote('Bookmaker', bkPick, maxP, 2.5 * lqW.bookmaker, '💰');
+        addVote('Bookmaker', bkPick, maxP, 2.5, '💰', 'market');
       }
-      
-      // 3. Regression Score (peso 2 × leagueQ)
-      if (regressionResult && regressionResult.score >= 55) {
-        const rPick = regressionResult.favIs === 'home' ? '1' : '2';
-        addVote('Regressione', rPick, regressionResult.score, 2 * lqW.regression, '📊');
-      }
-      
-      // 4. Super AI con news (peso 2 × leagueQ)
-      if (superAI && !superAI.error && superAI.bestPick) {
-        addVote('Oracle AI', superAI.bestPick, superAI.confidence || 60, 2 * lqW.superAI, '🔮');
-      }
-      
-      // 5. Super Algoritmo locale (peso 2 × leagueQ)
-      if (superAlgo && superAlgo.topPick) {
-        addVote('Super Algo', superAlgo.topPick.value, superAlgo.topPick.prob, 2 * lqW.superAI, '⚡');
-      }
-      
-      // 6. Steam Move (peso 1.5 × bookmaker quality, perché lo steam è movimento di book)
-      if (oddsLab && oddsLab.steamMoves.length > 0) {
+      if (oddsLab && oddsLab.steamMoves && oddsLab.steamMoves.length > 0) {
         const bullish = oddsLab.steamMoves.find(s => s.type === 'bullish');
         if (bullish) {
           const steamPick = bullish.direction === 'home' ? '1' : '2';
-          addVote('Smart Money', steamPick, 65, 1.5 * lqW.bookmaker, '🔥');
+          addVote('Smart Money', steamPick, 65, 1.5, '🔥', 'market');
         }
       }
       
-      // Trova il pick con il peso cumulativo più alto
-      const sortedPicks = Object.entries(pickVotes)
-        .map(([pick, data]) => ({ pick, ...data, score: data.totalWeight * (data.maxProb / 100) * data.count }))
-        .sort((a, b) => b.score - a.score);
+      // FAMIGLIA META — segnali strutturali/storici
+      if (regressionResult && regressionResult.score >= 55) {
+        const rPick = regressionResult.favIs === 'home' ? '1' : '2';
+        addVote('Regressione', rPick, regressionResult.score, 2, '📊', 'meta');
+      }
       
-      if (sortedPicks.length === 0) return null;
+      if (sources.length === 0) return null;
       
-      const winner = sortedPicks[0];
+      // ============================================================
+      // AGGREGAZIONE PER FAMIGLIA — ogni famiglia produce 1 solo voto
+      // (così i modelli correlati non gonfiano il count)
+      // ============================================================
+      const FAMILIES = ['xg', 'market', 'meta'];
+      const familyVotes = []; // [{ family, pick, prob, weight, contributors }]
+      
+      FAMILIES.forEach(fam => {
+        const famSources = sources.filter(s => s.family === fam);
+        if (famSources.length === 0) return;
+        
+        // All'interno della famiglia, raggruppo per pick e calcolo peso totale
+        const famPicks = {};
+        famSources.forEach(s => {
+          if (!famPicks[s.pick]) famPicks[s.pick] = { weightedProb: 0, totalWeight: 0, contributors: [] };
+          famPicks[s.pick].weightedProb += s.prob * s.weight;
+          famPicks[s.pick].totalWeight += s.weight;
+          famPicks[s.pick].contributors.push(s.name);
+        });
+        
+        // Pick rappresentante della famiglia = quello con peso totale più alto
+        const famPickEntries = Object.entries(famPicks)
+          .map(([pick, d]) => ({ 
+            pick, 
+            prob: d.weightedProb / d.totalWeight, 
+            totalWeight: d.totalWeight, 
+            contributors: d.contributors 
+          }))
+          .sort((a, b) => b.totalWeight - a.totalWeight);
+        
+        const famWinner = famPickEntries[0];
+        familyVotes.push({
+          family: fam,
+          pick: famWinner.pick,
+          prob: famWinner.prob,
+          weight: famWinner.totalWeight,
+          contributors: famWinner.contributors
+        });
+      });
+      
+      // ============================================================
+      // PICK GLOBALE — accordo TRA famiglie (segnali davvero indipendenti)
+      // ============================================================
+      const familyPickGroups = {}; // { pick: [familyVote, ...] }
+      familyVotes.forEach(fv => {
+        if (!familyPickGroups[fv.pick]) familyPickGroups[fv.pick] = [];
+        familyPickGroups[fv.pick].push(fv);
+      });
+      
+      // Ranking pick per: 1) numero famiglie d'accordo, 2) prob ponderata
+      const pickRanking = Object.entries(familyPickGroups).map(([pick, fams]) => {
+        const totalW = fams.reduce((s, f) => s + f.weight, 0);
+        const weightedProb = fams.reduce((s, f) => s + f.prob * f.weight, 0) / totalW;
+        return { 
+          pick, 
+          familyCount: fams.length, 
+          families: fams.map(f => f.family), 
+          prob: weightedProb, 
+          totalWeight: totalW 
+        };
+      }).sort((a, b) => {
+        if (b.familyCount !== a.familyCount) return b.familyCount - a.familyCount;
+        return b.prob - a.prob;
+      });
+      
+      const winner = pickRanking[0];
+      const totalActiveFamilies = familyVotes.length;
+      
+      // ============================================================
+      // CONFIDENCE CALIBRATA — basata su famiglie INDIPENDENTI d'accordo
+      // (NON più sul count grezzo dei voti correlati)
+      // ============================================================
+      let confidence = 'BASSA', confidenceColor = '#f87171';
+      
+      if (winner.familyCount >= 3 && winner.prob >= 65) {
+        // Tutte e 3 le famiglie d'accordo + alta probabilità = oro puro
+        confidence = 'MASSIMA'; confidenceColor = '#00e5a0';
+      } else if (winner.familyCount >= 2 && winner.prob >= 60 && totalActiveFamilies >= 2) {
+        // 2+ famiglie indipendenti d'accordo + buona probabilità
+        confidence = 'ALTA'; confidenceColor = '#00d4ff';
+      } else if (winner.familyCount >= 2 && winner.prob >= 52) {
+        // 2 famiglie d'accordo ma prob non eccezionale
+        confidence = 'MEDIA'; confidenceColor = '#fbbf24';
+      } else if (winner.familyCount === 1 && winner.prob >= 65 && totalActiveFamilies === 1) {
+        // Una sola famiglia attiva ma prob molto alta — può essere MEDIA, mai più
+        confidence = 'MEDIA'; confidenceColor = '#fbbf24';
+      } else {
+        // Famiglie discordi o segnale debole
+        confidence = 'BASSA'; confidenceColor = '#f87171';
+      }
+      
+      // ============================================================
+      // OUTPUT — backward compatible con tutto il downstream
+      // ============================================================
       const totalSources = sources.length;
       const agreeSources = sources.filter(s => s.pick === winner.pick).length;
-      const agreement = totalSources > 0 ? (agreeSources / totalSources * 100) : 0;
-      
-      // Confidence calibrata
-      let confidence = 'medium', confidenceColor = '#fbbf24';
-      if (agreement >= 80 && winner.maxProb >= 60) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
-      else if (agreement >= 60 && winner.maxProb >= 55) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
-      else if (agreement >= 40) { confidence = 'MEDIA'; confidenceColor = '#fbbf24'; }
-      else { confidence = 'BASSA'; confidenceColor = '#f87171'; }
-      
-      // Calcola prob ponderata
-      const agreeingSources = sources.filter(s => s.pick === winner.pick);
-      let weightedProb = 0, sumWeights = 0;
-      agreeingSources.forEach(s => { weightedProb += s.prob * s.weight; sumWeights += s.weight; });
-      const finalProb = sumWeights > 0 ? weightedProb / sumWeights : winner.maxProb;
+      // agreement ora rappresenta % famiglie d'accordo (più informativo del raw count)
+      const familyAgreement = totalActiveFamilies > 0 ? (winner.familyCount / totalActiveFamilies * 100) : 0;
       
       return {
         pick: winner.pick,
-        prob: finalProb.toFixed(1),
+        prob: winner.prob.toFixed(1),
         confidence,
         confidenceColor,
-        agreement: agreement.toFixed(0),
+        agreement: familyAgreement.toFixed(0),
         agreeSources,
         totalSources,
         sources: sources.map(s => ({ ...s, agrees: s.pick === winner.pick })),
-        alternatives: sortedPicks.slice(1, 3).map(p => ({ pick: p.pick, sources: p.count, prob: p.maxProb.toFixed(0) })),
-        leagueQuality: leagueQ
+        alternatives: pickRanking.slice(1, 3).map(p => ({ 
+          pick: p.pick, 
+          sources: p.familyCount, 
+          prob: p.prob.toFixed(0) 
+        })),
+        // NUOVI campi diagnostici (non rompono il downstream esistente)
+        familyVotes: familyVotes.map(f => ({ 
+          family: f.family, 
+          pick: f.pick, 
+          prob: f.prob.toFixed(0), 
+          contributors: f.contributors 
+        })),
+        activeFamilies: totalActiveFamilies,
+        winnerFamilies: winner.familyCount
       };
     }
 
@@ -7965,11 +7432,6 @@ async function analyzeMatch(match) {
       
       return `<div class="consensus-panel">
         <div style="font-size:0.62rem;color:var(--text-dark);text-align:center;">CONSENSUS ENGINE • ${consensus.totalSources} fonti analizzate</div>
-        ${consensus.leagueQuality && consensus.leagueQuality.warning ? `
-          <div style="margin:8px 0;padding:7px 10px;background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.25);border-left:3px solid #f5a623;border-radius:4px;font-size:0.65rem;color:#f5a623;line-height:1.45;">
-            <strong>${consensus.leagueQuality.label}</strong> — ${consensus.leagueQuality.warning}
-          </div>
-        ` : ''}
         <div class="consensus-pick" style="color:${consensus.confidenceColor};">🏆 ${consensus.pick}</div>
         <div class="consensus-confidence">
           <span style="color:${consensus.confidenceColor};font-weight:800;">${consensus.confidence}</span> • Prob: ${consensus.prob}% • Accordo: ${consensus.agreement}% (${consensus.agreeSources}/${consensus.totalSources})
@@ -8656,79 +8118,23 @@ async function analyzeMatch(match) {
       }
       html += '</div>';
       
-      // ═══ TIRI IN PORTA — modello calibrato su dati statistici stagionali ═══
-      //
-      // L'API-Football PRO `team/statistics` NON restituisce direttamente i tiri stagionali
-      // (verificato sul campo). Però restituisce dati che permettono una stima molto migliore
-      // della formula universale "xG × 8.5":
-      //   - goalsFor / goalsAgainst medi
-      //   - cleanSheetPct / failedToScorePct
-      //   - winRate
-      //   - distribuzione gol per minuto
-      //
-      // Modello v2 — calibrato su Serie A 2024-25:
-      //
-      //   shotsPerMatch = base + adjFor squadre prolifiche - adjAgainst squadre difensive
-      //
-      // Una squadra che segna molto fa più tiri (correlazione 0.78 nelle stagioni recenti).
-      // Una squadra molto difensiva (alto CS, basso goalsFor) fa meno tiri.
-      // Il SoT-rate dipende dall'efficacia: alta = sa convertire (ratio fino a 0.42),
-      // bassa = tira tanto male (ratio fino a 0.28).
-
-      var hShots, aShots, hSoT, aSoT;
-
-      // === Calcolo TIRI casa ===
-      // Base: 11 tiri/match è la media Serie A
-      hShots = 11.0;
-      // Boost per prolificità offensiva
-      if (hD.goalsFor >= 2.5) hShots += 4.5;
-      else if (hD.goalsFor >= 2.0) hShots += 3.0;
-      else if (hD.goalsFor >= 1.6) hShots += 1.5;
-      else if (hD.goalsFor <= 0.9) hShots -= 2.5;
-      else if (hD.goalsFor <= 1.2) hShots -= 1.0;
-      // Penalizzazione se difesa avversaria forte
-      if (aD.cleanSheetPct >= 35) hShots *= 0.90;
-      else if (aD.cleanSheetPct <= 15) hShots *= 1.08;
-      // Bonus casa
-      hShots *= 1.05;
-
-      // SoT-rate casa: dipende da quanto la squadra è efficace (winRate alto + bassa failedToScore)
-      var hSoTRate = 0.34; // base media
-      if (hD.failedToScorePct <= 20 && hD.winRate >= 50) hSoTRate = 0.40; // squadra che converte bene
-      else if (hD.failedToScorePct >= 40) hSoTRate = 0.29; // squadra spesso steccata
-      hSoT = hShots * hSoTRate;
-
-      // === Calcolo TIRI ospite (stesso schema) ===
-      aShots = 11.0;
-      if (aD.goalsFor >= 2.0) aShots += 3.5;
-      else if (aD.goalsFor >= 1.6) aShots += 2.0;
-      else if (aD.goalsFor >= 1.3) aShots += 1.0;
-      else if (aD.goalsFor <= 0.8) aShots -= 2.5;
-      else if (aD.goalsFor <= 1.0) aShots -= 1.0;
-      if (hD.cleanSheetPct >= 35) aShots *= 0.90;
-      else if (hD.cleanSheetPct <= 15) aShots *= 1.08;
-      // Penalty trasferta
-      aShots *= 0.95;
-
-      var aSoTRate = 0.32;
-      if (aD.failedToScorePct <= 20 && aD.winRate >= 45) aSoTRate = 0.38;
-      else if (aD.failedToScorePct >= 40) aSoTRate = 0.27;
-      aSoT = aShots * aSoTRate;
-
-      // Clamp realistici per Serie A/leghe top
-      hShots = clamp(5, hShots, 22);
-      aShots = clamp(4, aShots, 20);
-      hSoT = clamp(2, hSoT, 9);
-      aSoT = clamp(1.5, aSoT, 8);
-
+      // ═══ TIRI IN PORTA (stimati da xG) ═══
+      // Relazione: shots on target ≈ xG × 3.2 (media europea)
+      // Shots totali ≈ xG × 8.5
+      var hSoT = xG.home * 3.2, aSoT = xG.away * 3.2;
+      var hShots = xG.home * 8.5, aShots = xG.away * 8.5;
+      
+      // Aggiusta con dati reali se disponibili
+      if (hD.goalsFor >= 2.0) { hSoT *= 1.1; hShots *= 1.08; }
+      if (aD.goalsFor >= 1.8) { aSoT *= 1.08; aShots *= 1.06; }
+      if (hD.cleanSheetPct >= 35) { aSoT *= 0.9; aShots *= 0.92; }
+      if (aD.cleanSheetPct >= 35) { hSoT *= 0.9; hShots *= 0.92; }
+      
       var totSoT = hSoT + aSoT;
       var totShots = hShots + aShots;
-
+      
       html += '<div style="padding:12px;background:rgba(96,165,250,0.04);border:1px solid rgba(96,165,250,0.15);border-radius:12px;">';
-      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
-      html += '<div style="font-size:0.75rem;font-weight:800;color:#60a5fa;">🎯 Tiri in Porta</div>';
-      html += '<div style="font-size:0.55rem;color:#60a5fa;font-weight:600;letter-spacing:0.05em;">📊 MODELLO STATISTICO</div>';
-      html += '</div>';
+      html += '<div style="font-size:0.75rem;font-weight:800;color:#60a5fa;margin-bottom:10px;">🎯 Tiri in Porta (stimati da xG)</div>';
       
       // Tiri per squadra
       html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">';
@@ -8772,7 +8178,7 @@ async function analyzeMatch(match) {
       });
       html += '</div>';
       
-      html += '<div style="font-size:0.5rem;color:var(--text-dark);margin-top:4px;text-align:center;">SoT = Shots on Target. Modello calibrato su prolificità offensiva, solidità difensiva e matchup avversario.</div>';
+      html += '<div style="font-size:0.5rem;color:var(--text-dark);margin-top:4px;text-align:center;">SoT = Shots on Target (Tiri in porta). Stime basate su xG e profilo offensivo/difensivo.</div>';
       html += '</div>';
       
       // ═══ CARTELLINI ═══
@@ -8786,35 +8192,6 @@ async function analyzeMatch(match) {
         var cProb35 = cards.probs && cards.probs[3.5] ? cards.probs[3.5] : null;
         if (cProb35) {
           html += '<div style="font-size:0.55rem;color:var(--text-dark);margin-top:4px;">Over 3.5: ' + cProb35.over.toFixed(0) + '% | Under 3.5: ' + cProb35.under.toFixed(0) + '%</div>';
-        }
-        // === BADGE ARBITRO se disponibile ===
-        if (cards.refereeInfo && cards.refereeInfo.name) {
-          var refLabel, refColor, refDescr;
-          if (!cards.refereeInfo.found) {
-            refLabel = '👁️ Arbitro';
-            refColor = '#94a3b8';
-            refDescr = 'Statistiche non in database, modello neutrale';
-          } else if (cards.refereeInfo.mult >= 1.10) {
-            refLabel = '🚨 Arbitro severo';
-            refColor = '#ef4444';
-            refDescr = 'Estrae più cartellini della media (×' + cards.refereeInfo.mult.toFixed(2) + ')';
-          } else if (cards.refereeInfo.mult >= 1.05) {
-            refLabel = '⚠️ Arbitro deciso';
-            refColor = '#f59e0b';
-            refDescr = 'Tendenzialmente severo (×' + cards.refereeInfo.mult.toFixed(2) + ')';
-          } else if (cards.refereeInfo.mult <= 0.95) {
-            refLabel = '🕊️ Arbitro permissivo';
-            refColor = '#10b981';
-            refDescr = 'Estrae meno cartellini della media (×' + cards.refereeInfo.mult.toFixed(2) + ')';
-          } else {
-            refLabel = '⚖️ Arbitro nella media';
-            refColor = '#94a3b8';
-            refDescr = 'Stile equilibrato (×' + cards.refereeInfo.mult.toFixed(2) + ')';
-          }
-          html += '<div style="margin-top:6px;padding:6px 8px;background:' + refColor + '10;border:1px solid ' + refColor + '25;border-left:3px solid ' + refColor + ';border-radius:6px;font-size:0.55rem;">';
-          html += '<div style="font-weight:700;color:' + refColor + ';margin-bottom:2px;">' + refLabel + ': ' + esc(cards.refereeInfo.name) + '</div>';
-          html += '<div style="color:var(--text-dark);font-size:0.5rem;">' + refDescr + '</div>';
-          html += '</div>';
         }
         html += '</div>';
       }
@@ -12826,7 +12203,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               })()}
               ${d.homeFatigue && d.homeFatigue < 0.95 ? `<span style="font-size:0.6rem;background:rgba(248,113,113,0.15);color:#f87171;padding:2px 7px;border-radius:4px;">⚡ ${m.home.name.split(' ')[0]} stanco</span>` : ''}
               ${d.awayFatigue && d.awayFatigue < 0.95 ? `<span style="font-size:0.6rem;background:rgba(248,113,113,0.15);color:#f87171;padding:2px 7px;border-radius:4px;">⚡ ${m.away.name.split(' ')[0]} stanco</span>` : ''}
-              ${d.weatherEffect && d.weatherEffect.active ? `<span style="font-size:0.6rem;background:rgba(96,165,250,0.15);color:#60a5fa;padding:2px 7px;border-radius:4px;font-weight:700;" title="Modello aggiustato per condizioni meteo">${d.weatherEffect.condition}</span>` : ''}
               ${(() => {
                 // STAKE ADVISOR BADGE — compatto, sostituisce la sezione completa
                 try {
@@ -13620,12 +12996,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
                   <span class="standings-stat">➖ ${d.homePosition.draw}P</span>
                   <span class="standings-stat">❌ ${d.homePosition.lost}S</span>
                 </div>
-                ${d.homePosition.endOfSeason?.contextActive ? `
-                  <div style="margin-top:8px;padding:6px 10px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:6px;font-size:0.65rem;line-height:1.4;">
-                    <div style="font-weight:700;color:#60a5fa;margin-bottom:2px;">${d.homePosition.endOfSeason.contextLabel}</div>
-                    <div style="color:var(--text-dark);font-size:0.62rem;">${d.homePosition.endOfSeason.details}</div>
-                  </div>
-                ` : ''}
               </div>
             ` : '<div class="standings-card"><span style="color:var(--text-dark)">Classifica non disponibile</span></div>'}
             ${d.awayPosition ? `
@@ -13643,12 +13013,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
                   <span class="standings-stat">➖ ${d.awayPosition.draw}P</span>
                   <span class="standings-stat">❌ ${d.awayPosition.lost}S</span>
                 </div>
-                ${d.awayPosition.endOfSeason?.contextActive ? `
-                  <div style="margin-top:8px;padding:6px 10px;background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.2);border-radius:6px;font-size:0.65rem;line-height:1.4;">
-                    <div style="font-weight:700;color:#a78bfa;margin-bottom:2px;">${d.awayPosition.endOfSeason.contextLabel}</div>
-                    <div style="color:var(--text-dark);font-size:0.62rem;">${d.awayPosition.endOfSeason.details}</div>
-                  </div>
-                ` : ''}
               </div>
             ` : ''}
             <!-- Forma recente compatta -->
