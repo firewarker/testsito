@@ -4150,15 +4150,17 @@ async function analyzeMatch(match) {
           try {
             const oddsLab = await fetchOddsLab(match.id);
             state.oddsLab = oddsLab;
+            if (oddsLab) recordOddsSnapshot(match.id, oddsLab);
             if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
-            state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
+            const dropSig1 = computeDroppingOddsSignal(match.id, oddsLab);
+            state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis, dropSig1);
             render();
           } catch(e) {
             state.regressionScore = calculateRegressionScore(match, cached, null);
             const aiC = generateAIAdvice(match, cached);
-            state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis);
+            state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis, null);
             render();
           }
         })();
@@ -4305,6 +4307,7 @@ async function analyzeMatch(match) {
           console.log('🔬 v7: Fetching Odds Lab...');
           const oddsLab = await fetchOddsLab(match.id);
           state.oddsLab = oddsLab;
+          if (oddsLab) recordOddsSnapshot(match.id, oddsLab);
           
           // Value Bets (richiede oddsLab)
           if (oddsLab) {
@@ -4318,9 +4321,10 @@ async function analyzeMatch(match) {
           
           // Consensus Engine (richiede tutti i dati)
           const aiForConsensus = generateAIAdvice(match, state.analysis);
+          const dropSig3 = computeDroppingOddsSignal(match.id, oddsLab);
           state.consensus = buildConsensusEngine(
             match, state.analysis, aiForConsensus, oddsLab, state.regressionScore,
-            state.superAIAnalysis, state.superAnalysis
+            state.superAIAnalysis, state.superAnalysis, dropSig3
           );
           console.log('✅ v7: Consensus Engine:', state.consensus?.pick, state.consensus?.confidence);
           
@@ -4331,7 +4335,7 @@ async function analyzeMatch(match) {
           // Calcola comunque Regression e Consensus senza oddsLab
           state.regressionScore = calculateRegressionScore(match, state.analysis, null);
           const aiForConsensus = generateAIAdvice(match, state.analysis);
-          state.consensus = buildConsensusEngine(match, state.analysis, aiForConsensus, null, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
+          state.consensus = buildConsensusEngine(match, state.analysis, aiForConsensus, null, state.regressionScore, state.superAIAnalysis, state.superAnalysis, null);
           render();
         }
         return; // Già renderizzato sopra
@@ -7111,9 +7115,116 @@ async function analyzeMatch(match) {
     }
 
     // ============================================================
+    // 4-bis. DROPPING ODDS DETECTOR (V8)
+    // Storage client-side in localStorage. Snapshot quote per ogni match,
+    // detection di drop significativi come 4ª famiglia indipendente.
+    // ============================================================
+    
+    function recordOddsSnapshot(matchId, oddsLab) {
+      try {
+        if (!matchId || !oddsLab || !oddsLab.consensus) return;
+        const KEY = 'bp2_odds_snapshots';
+        const all = JSON.parse(localStorage.getItem(KEY) || '{}');
+        if (!all[matchId]) all[matchId] = [];
+        
+        const snap = {
+          t: Date.now(),
+          home: parseFloat(oddsLab.consensus.home.toFixed(1)),
+          draw: parseFloat(oddsLab.consensus.draw.toFixed(1)),
+          away: parseFloat(oddsLab.consensus.away.toFixed(1)),
+          over25: oddsLab.markets && oddsLab.markets.ou25 ? parseFloat(oddsLab.markets.ou25.impliedOver) : null,
+          btts: oddsLab.markets && oddsLab.markets.btts ? parseFloat(oddsLab.markets.btts.impliedYes) : null
+        };
+        
+        // Evita snapshot duplicati troppo ravvicinati (< 2h dall'ultimo)
+        const last = all[matchId][all[matchId].length - 1];
+        if (last && (snap.t - last.t) < 2 * 3600 * 1000) {
+          // Aggiorna l'ultimo invece di duplicare
+          all[matchId][all[matchId].length - 1] = snap;
+        } else {
+          all[matchId].push(snap);
+        }
+        
+        // Pulizia: max 30 snapshot per match
+        if (all[matchId].length > 30) all[matchId] = all[matchId].slice(-30);
+        
+        // Pulizia globale: rimuovi match con ultimo snapshot > 7 giorni
+        const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+        Object.keys(all).forEach(mid => {
+          const arr = all[mid];
+          if (!arr || arr.length === 0 || arr[arr.length-1].t < cutoff) delete all[mid];
+        });
+        
+        localStorage.setItem(KEY, JSON.stringify(all));
+      } catch(e) {
+        console.warn('recordOddsSnapshot error:', e);
+      }
+    }
+    
+    function computeDroppingOddsSignal(matchId, currentOddsLab) {
+      try {
+        if (!matchId || !currentOddsLab || !currentOddsLab.consensus) return null;
+        const KEY = 'bp2_odds_snapshots';
+        const all = JSON.parse(localStorage.getItem(KEY) || '{}');
+        const history = all[matchId] || [];
+        if (history.length < 2) return null; // serve storico minimo
+        
+        const current = currentOddsLab.consensus;
+        const now = Date.now();
+        
+        // Cerca uno snapshot "vecchio" (>= 12h fa). Se non c'è, usa il più vecchio disponibile.
+        const minOldT = now - 12 * 3600 * 1000;
+        const oldSnap = history.find(s => s.t <= minOldT) || history[0];
+        const hoursElapsed = (now - oldSnap.t) / 3600000;
+        
+        // Drop = aumento prob implicita (= quote scendono = soldi entrano)
+        const drops = [
+          { pick: '1', delta: current.home - oldSnap.home, currentProb: current.home },
+          { pick: 'X', delta: current.draw - oldSnap.draw, currentProb: current.draw },
+          { pick: '2', delta: current.away - oldSnap.away, currentProb: current.away }
+        ];
+        
+        // Aggiungi drops Over 2.5 / BTTS se disponibili
+        if (currentOddsLab.markets && currentOddsLab.markets.ou25 && oldSnap.over25 != null) {
+          const curOver = parseFloat(currentOddsLab.markets.ou25.impliedOver);
+          drops.push({ pick: 'Over 2.5', delta: curOver - oldSnap.over25, currentProb: curOver });
+        }
+        if (currentOddsLab.markets && currentOddsLab.markets.btts && oldSnap.btts != null) {
+          const curBtts = parseFloat(currentOddsLab.markets.btts.impliedYes);
+          drops.push({ pick: 'GG', delta: curBtts - oldSnap.btts, currentProb: curBtts });
+        }
+        
+        // Trova drop più significativo
+        drops.sort((a,b) => b.delta - a.delta);
+        const top = drops[0];
+        
+        // Soglia: drop >= 4 punti percentuali (+ filtro: il pick attualmente deve avere prob >= 35)
+        if (top.delta < 4 || top.currentProb < 35) return null;
+        
+        // Confidence proporzionale al drop
+        let confidence = 55;
+        if (top.delta >= 8) confidence = 65;
+        if (top.delta >= 12) confidence = 75;
+        if (top.delta >= 16) confidence = 82;
+        
+        return {
+          pick: top.pick,
+          confidence: confidence,
+          delta: top.delta.toFixed(1),
+          currentProb: top.currentProb.toFixed(1),
+          hoursElapsed: hoursElapsed.toFixed(1),
+          oldProb: (top.currentProb - top.delta).toFixed(1)
+        };
+      } catch(e) {
+        console.warn('computeDroppingOddsSignal error:', e);
+        return null;
+      }
+    }
+    
+    // ============================================================
     // 4. CONSENSUS ENGINE — Fusione intelligente di tutte le fonti
     // ============================================================
-    function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo) {
+    function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo, dropSignal) {
       if (!analysis) return null;
       
       const sources = [];
@@ -7190,13 +7301,18 @@ async function analyzeMatch(match) {
         addVote('Regressione', rPick, regressionResult.score, 2, '📊', 'meta');
       }
       
+      // FAMIGLIA DROPS — movimento storico delle quote (smart money detection)
+      if (dropSignal && dropSignal.confidence >= 55) {
+        addVote('Drop Detector', dropSignal.pick, dropSignal.confidence, 2, '📉', 'drops');
+      }
+      
       if (sources.length === 0) return null;
       
       // ============================================================
       // AGGREGAZIONE PER FAMIGLIA — ogni famiglia produce 1 solo voto
       // (così i modelli correlati non gonfiano il count)
       // ============================================================
-      const FAMILIES = ['xg', 'market', 'meta'];
+      const FAMILIES = ['xg', 'market', 'meta', 'drops'];
       const familyVotes = []; // [{ family, pick, prob, weight, contributors }]
       
       FAMILIES.forEach(fam => {
@@ -10081,6 +10197,7 @@ async function analyzeMatch(match) {
             <div class="brand">
               <div class="brand-icon">⚽</div>
               <span class="brand-name">BettingPro</span>
+              <span class="version-badge" title="Consensus Engine a 4 famiglie indipendenti — Dropping Odds Detector attivo" style="margin-left:6px;font-size:0.55rem;font-weight:800;padding:2px 7px;border-radius:8px;background:linear-gradient(135deg,#10b981,#059669);color:white;letter-spacing:0.05em;vertical-align:middle;text-transform:uppercase;box-shadow:0 1px 3px rgba(16,185,129,0.3);">v8.0</span>
             </div>
             <div class="header-right">
               <button onclick="toggleTheme()" title="Cambia tema" style="background:none;border:1px solid var(--border);border-radius:8px;padding:5px 9px;cursor:pointer;font-size:0.85rem;color:var(--text-gray);transition:all 0.2s;" id="themeBtn">
