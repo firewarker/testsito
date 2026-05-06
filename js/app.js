@@ -10263,7 +10263,7 @@ async function analyzeMatch(match) {
             <div class="v9-brand-icon">⚽</div>
             <div>
               <div class="v9-brand-name">BettingPro</div>
-              <div class="v9-brand-version">v8.1 · 4 famiglie</div>
+              <div class="v9-brand-version">v9.0 · 4 famiglie</div>
             </div>
           </div>
           <div class="v9-status-cluster">
@@ -14188,7 +14188,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
     // === INIT ===
     async function init() {
-      console.log('%c🚀 BettingPro v8.1', 'font-size:14px;font-weight:bold;color:#10b981;', '— 4 famiglie Consensus + Drop Detector adattivo + Best Multigol');
+      console.log('%c🚀 BettingPro v9.0', 'font-size:14px;font-weight:bold;color:#10b981;', '— Restyling Premium · 4 famiglie Consensus + Drop Detector adattivo + Best Multigol');
       console.log('%c  Sistemi attivi:', 'color:#888;', '🎯 xG | 💰 Market | 📊 Meta | 📉 Drops');
 
       // === PULIZIA localStorage ALL'AVVIO ===
