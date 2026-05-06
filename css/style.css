@@ -5094,3 +5094,46 @@ button:focus-visible, a:focus-visible {
   .v9-mg-trio { grid-template-columns: 1fr !important; }
   .v9-quick-markets { gap: 6px !important; }
 }
+
+/* === V9 FORM SQUADRE: override eleganti per le ultime 5 partite === */
+/* Sovrascrive le quadratone legacy con pallini piccoli orizzontali */
+.v9-match-team-form {
+  display: flex !important;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+}
+.v9-match-team-form .form-w,
+.v9-match-team-form .form-d,
+.v9-match-team-form .form-l {
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 50% !important;
+  font-size: 9px !important;
+  font-weight: 800 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-shadow: none !important;
+  letter-spacing: 0 !important;
+  flex-shrink: 0;
+  line-height: 1 !important;
+  color: white !important;
+}
+.v9-match-team-form .form-w {
+  background: var(--accent-emerald) !important;
+}
+.v9-match-team-form .form-d {
+  background: rgba(255,255,255,0.12) !important;
+  color: var(--text-gray) !important;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.v9-match-team-form .form-l {
+  background: rgba(248,113,113,0.75) !important;
+}
+.v9-match-team-form span:empty,
+.v9-match-team-form .form- {
+  display: none !important;
+}
