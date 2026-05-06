@@ -11889,7 +11889,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             </button>
           </div>
           <!-- BANDIERE NAZIONI (collassabile) -->
-          <div id="countryFlagsPanel" style="display:${state.leagueFilter.startsWith('country:') ? 'flex' : 'none'};gap:5px;flex-wrap:wrap;margin-bottom:10px;padding:8px;background:rgba(0,0,0,0.15);border-radius:10px;border:1px solid var(--border);">
+          <div id="countryFlagsPanel" style="display:${state.leagueFilter.startsWith('country:') ? 'flex' : 'none'};gap:6px;flex-wrap:wrap;margin-bottom:10px;padding:10px;background:var(--bg-card-light);border-radius:10px;border:1px solid var(--border);max-height:140px;overflow-y:auto;align-content:flex-start;">
             ${filterBtns.filter(f => f.key.startsWith('country:')).map(f => `
               <button onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || ''}" style="
                 width:32px;height:32px;border-radius:50%;font-size:0.9rem;cursor:pointer;display:flex;align-items:center;justify-content:center;
@@ -12421,7 +12421,14 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             <div class="v9-match-team">
               ${m.home.logo ? `<img src="${m.home.logo}" class="v9-match-team-logo" onerror="this.outerHTML='<div class=&quot;v9-match-team-logo&quot;>${getInitials(m.home.name)}</div>'">` : `<div class="v9-match-team-logo">${getInitials(m.home.name)}</div>`}
               <div class="v9-match-team-name">${esc(m.home.name)}</div>
-              <div class="v9-match-team-form">${(d.homeForm || '').slice(0,5).split('').map(r => `<span class="form-${r.toLowerCase()}">${r}</span>`).join('')}</div>
+              <div class="v9-match-team-form" style="display:flex;justify-content:center;align-items:center;gap:5px;margin-top:6px;">${(d.homeForm || '').slice(0,5).split('').map(r => {
+                const c = r.toUpperCase();
+                if (c !== 'W' && c !== 'L' && c !== 'D') return '';
+                const cfg = c === 'W' ? 'background:#10b981;color:white;'
+                          : c === 'L' ? 'background:rgba(248,113,113,0.85);color:white;'
+                          : 'background:rgba(255,255,255,0.12);color:#94a3b8;border:1px solid rgba(255,255,255,0.08);';
+                return `<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:800;line-height:1;box-shadow:none;${cfg}">${c}</span>`;
+              }).join('')}</div>
             </div>
             <div class="v9-score-prediction">
               <div class="v9-score-label">Risultato Previsto</div>
@@ -12431,7 +12438,14 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             <div class="v9-match-team">
               ${m.away.logo ? `<img src="${m.away.logo}" class="v9-match-team-logo" onerror="this.outerHTML='<div class=&quot;v9-match-team-logo&quot;>${getInitials(m.away.name)}</div>'">` : `<div class="v9-match-team-logo">${getInitials(m.away.name)}</div>`}
               <div class="v9-match-team-name">${esc(m.away.name)}</div>
-              <div class="v9-match-team-form">${(d.awayForm || '').slice(0,5).split('').map(r => `<span class="form-${r.toLowerCase()}">${r}</span>`).join('')}</div>
+              <div class="v9-match-team-form" style="display:flex;justify-content:center;align-items:center;gap:5px;margin-top:6px;">${(d.awayForm || '').slice(0,5).split('').map(r => {
+                const c = r.toUpperCase();
+                if (c !== 'W' && c !== 'L' && c !== 'D') return '';
+                const cfg = c === 'W' ? 'background:#10b981;color:white;'
+                          : c === 'L' ? 'background:rgba(248,113,113,0.85);color:white;'
+                          : 'background:rgba(255,255,255,0.12);color:#94a3b8;border:1px solid rgba(255,255,255,0.08);';
+                return `<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:800;line-height:1;box-shadow:none;${cfg}">${c}</span>`;
+              }).join('')}</div>
             </div>
           </div>
           

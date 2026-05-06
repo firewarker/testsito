@@ -5137,3 +5137,276 @@ button:focus-visible, a:focus-visible {
 .v9-match-team-form .form- {
   display: none !important;
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* === V9.1 FIX: Oracle Super Algoritmo + Light Mode + Polish aggressivo  === */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/* === ORACLE SUPER ALGORITMO uniformato al design V9 === */
+.super-algo-panel {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 14px !important;
+  padding: 18px !important;
+}
+.super-algo-header {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  margin-bottom: 16px !important;
+  padding-bottom: 14px !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.super-algo-icon {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 10px !important;
+  background: var(--bg-input) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 16px !important;
+  flex-shrink: 0 !important;
+}
+.super-algo-title {
+  font-size: 15px !important;
+  font-weight: 800 !important;
+  color: var(--text-white) !important;
+  letter-spacing: -0.01em !important;
+}
+.super-algo-subtitle {
+  font-size: 10px !important;
+  color: var(--text-dark) !important;
+  letter-spacing: 0.04em !important;
+  margin-top: 2px !important;
+  font-weight: 500 !important;
+}
+.super-algo-badge {
+  margin-left: auto !important;
+  font-size: 10px !important;
+  font-weight: 800 !important;
+  padding: 4px 10px !important;
+  border-radius: 6px !important;
+  background: rgba(245,158,11,0.12) !important;
+  color: var(--accent-gold) !important;
+  border: 1px solid rgba(245,158,11,0.3) !important;
+  letter-spacing: 0.05em !important;
+}
+
+/* Super pick cards — uniform V9 style */
+.super-pick-card {
+  background: var(--bg-card-light) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 10px !important;
+  padding: 10px 8px !important;
+  text-align: center !important;
+  transition: transform 0.15s ease, border-color 0.15s ease !important;
+  position: relative !important;
+}
+.super-pick-card:hover {
+  transform: translateY(-2px) !important;
+  border-color: rgba(255,255,255,0.18) !important;
+}
+.super-pick-card.rank-1 {
+  background: rgba(245,158,11,0.06) !important;
+  border-color: rgba(245,158,11,0.35) !important;
+}
+.super-pick-card.rank-2,
+.super-pick-card.rank-3 {
+  background: rgba(16,185,129,0.04) !important;
+  border-color: rgba(16,185,129,0.2) !important;
+}
+.super-pick-rank {
+  font-size: 9px !important;
+  color: var(--text-dark) !important;
+  letter-spacing: 0.08em !important;
+  font-weight: 700 !important;
+  margin-bottom: 3px !important;
+}
+.super-pick-card.rank-1 .super-pick-rank { color: var(--accent-gold) !important; }
+.super-pick-market {
+  font-size: 9px !important;
+  color: var(--text-dark) !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  margin-bottom: 4px !important;
+  font-weight: 600 !important;
+}
+.super-pick-value {
+  font-size: 13px !important;
+  font-weight: 800 !important;
+  color: var(--text-white) !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  margin-bottom: 4px !important;
+  line-height: 1.1 !important;
+}
+.super-pick-prob {
+  font-size: 16px !important;
+  font-weight: 800 !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  line-height: 1 !important;
+}
+.super-pick-prob.prob-high { color: var(--accent-emerald) !important; }
+.super-pick-prob.prob-med { color: var(--accent-yellow) !important; }
+.super-pick-prob.prob-low { color: var(--text-gray) !important; }
+
+.super-pick-confidence {
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  letter-spacing: 0.04em !important;
+}
+.super-pick-confidence.high { background: rgba(16,185,129,0.12) !important; color: var(--accent-emerald) !important; }
+.super-pick-confidence.medium { background: rgba(251,191,36,0.1) !important; color: var(--accent-yellow) !important; }
+.super-pick-confidence.low { background: rgba(248,113,113,0.1) !important; color: var(--accent-red) !important; }
+
+.super-signals-row {
+  display: flex !important;
+  justify-content: center !important;
+  gap: 3px !important;
+  margin-top: 5px !important;
+}
+.super-signal {
+  width: 5px !important;
+  height: 5px !important;
+  border-radius: 50% !important;
+}
+.super-signal.on { background: var(--accent-emerald) !important; }
+.super-signal.off { background: rgba(255,255,255,0.1) !important; }
+
+/* === LIGHT MODE per le classi V9 === */
+body.light-mode .v9-header {
+  background: rgba(248,250,253,0.95) !important;
+  border-bottom-color: rgba(0,0,0,0.08) !important;
+  backdrop-filter: blur(12px);
+}
+body.light-mode .v9-brand-name { color: #0f172a !important; }
+body.light-mode .v9-brand-version { color: #059669 !important; }
+body.light-mode .v9-brand-icon { background: #10b981 !important; }
+body.light-mode .v9-status-pill { background: rgba(16,185,129,0.08) !important; color: #059669 !important; border-color: rgba(16,185,129,0.25) !important; }
+body.light-mode .v9-status-pill.offline { background: rgba(248,113,113,0.08) !important; color: #dc2626 !important; border-color: rgba(248,113,113,0.25) !important; }
+body.light-mode .v9-user-pill { background: #e8edf5 !important; color: #1e293b !important; }
+body.light-mode .v9-action-btn.ghost { background: transparent !important; border: 1px solid rgba(0,0,0,0.12) !important; color: #475569 !important; }
+body.light-mode .v9-action-btn.ghost:hover { background: rgba(0,0,0,0.04) !important; }
+body.light-mode .v9-action-btn.success { background: #10b981 !important; color: white !important; }
+body.light-mode .v9-action-btn.warning { background: #f59e0b !important; color: white !important; }
+
+body.light-mode .v9-date-tab {
+  background: #fff !important;
+  border-color: rgba(0,0,0,0.08) !important;
+  color: #475569 !important;
+}
+body.light-mode .v9-date-tab.active {
+  background: #10b981 !important;
+  color: #fff !important;
+  border-color: transparent !important;
+}
+body.light-mode .v9-date-tab.live {
+  background: rgba(248,113,113,0.08) !important;
+  border-color: rgba(248,113,113,0.25) !important;
+  color: #dc2626 !important;
+}
+
+body.light-mode .v9-leagues-panel { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-leagues-head .title { color: #475569 !important; }
+body.light-mode .v9-leagues-head .count-badge { background: #f1f5f9 !important; color: #64748b !important; }
+body.light-mode .v9-filter-pill { background: #fff !important; border-color: rgba(0,0,0,0.1) !important; color: #475569 !important; }
+body.light-mode .v9-filter-pill:hover { border-color: rgba(0,0,0,0.18) !important; color: #0f172a !important; }
+body.light-mode .v9-filter-pill.active { background: #10b981 !important; color: #fff !important; border-color: transparent !important; }
+
+body.light-mode .v9-league-row {
+  background: #fafbfd !important;
+  border-color: rgba(0,0,0,0.06) !important;
+}
+body.light-mode .v9-league-row:hover { border-color: rgba(0,0,0,0.14) !important; background: #fff !important; }
+body.light-mode .v9-league-row.fav {
+  background: rgba(245,158,11,0.06) !important;
+  border-color: rgba(245,158,11,0.22) !important;
+}
+body.light-mode .v9-league-name { color: #0f172a !important; }
+body.light-mode .v9-league-meta { color: #94a3b8 !important; }
+body.light-mode .v9-league-count { color: #0f172a !important; }
+body.light-mode .v9-league-count-label { color: #94a3b8 !important; }
+body.light-mode .v9-league-arrow { color: #cbd5e1 !important; }
+
+body.light-mode .v9-stat-card { background: #fafbfd !important; border-color: transparent !important; }
+body.light-mode .v9-stat-card .v9-stat-num { color: #0f172a !important; }
+body.light-mode .v9-stat-card.highlight {
+  background: rgba(16,185,129,0.08) !important;
+  border-color: rgba(16,185,129,0.25) !important;
+}
+body.light-mode .v9-stat-card.highlight-gold {
+  background: rgba(245,158,11,0.08) !important;
+  border-color: rgba(245,158,11,0.3) !important;
+}
+
+body.light-mode .v9-match-hero { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-match-team-name { color: #0f172a !important; }
+body.light-mode .v9-match-team-logo { background: #f1f5f9 !important; border-color: rgba(0,0,0,0.06) !important; color: #475569 !important; }
+body.light-mode .v9-score-numbers { color: #0f172a !important; }
+body.light-mode .v9-score-numbers .sep { color: #cbd5e1 !important; }
+body.light-mode .v9-score-label { color: #94a3b8 !important; }
+
+body.light-mode .v9-consensus-panel { background: rgba(16,185,129,0.04) !important; }
+body.light-mode .v9-consensus-panel.tier-massima { background: rgba(245,158,11,0.06) !important; }
+body.light-mode .v9-consensus-title { color: #475569 !important; }
+body.light-mode .v9-family-pill { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-family-pill.agrees { background: rgba(16,185,129,0.08) !important; }
+body.light-mode .v9-family-pill.disagrees { background: rgba(248,113,113,0.06) !important; }
+body.light-mode .v9-family-pick { color: #0f172a !important; }
+
+body.light-mode .v9-mg-card { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-mg-card.best { background: rgba(245,158,11,0.06) !important; border-color: rgba(245,158,11,0.3) !important; }
+body.light-mode .v9-mg-value { color: #0f172a !important; }
+body.light-mode .v9-mg-prob { color: #64748b !important; }
+
+body.light-mode .v9-market-card { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-market-pick { color: #0f172a !important; }
+
+body.light-mode .v9-schedina-overlay { background: rgba(0,0,0,0.45) !important; }
+body.light-mode .v9-schedina-modal { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-schedina-head { background: #fff !important; border-bottom-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-schedina-title { color: #0f172a !important; }
+body.light-mode .v9-stat-pill { background: #f1f5f9 !important; }
+body.light-mode .v9-bet-card { background: #fafbfd !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .v9-bet-match { color: #0f172a !important; }
+body.light-mode .v9-bet-pick { color: #0f172a !important; }
+
+/* Light mode per le bandiere panel */
+body.light-mode #countryFlagsPanel { background: #f1f5f9 !important; border-color: rgba(0,0,0,0.06) !important; }
+body.light-mode #countryFlagsPanel button { background: #fff !important; }
+
+/* Light mode per Oracle Super Algoritmo */
+body.light-mode .super-algo-panel { background: #fff !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .super-algo-icon { background: #f1f5f9 !important; }
+body.light-mode .super-algo-title { color: #0f172a !important; }
+body.light-mode .super-algo-subtitle { color: #94a3b8 !important; }
+body.light-mode .super-pick-card { background: #fafbfd !important; border-color: rgba(0,0,0,0.08) !important; }
+body.light-mode .super-pick-card.rank-1 { background: rgba(245,158,11,0.08) !important; border-color: rgba(245,158,11,0.35) !important; }
+body.light-mode .super-pick-card.rank-2,
+body.light-mode .super-pick-card.rank-3 { background: rgba(16,185,129,0.06) !important; border-color: rgba(16,185,129,0.25) !important; }
+body.light-mode .super-pick-value { color: #0f172a !important; }
+body.light-mode .super-signal.off { background: rgba(0,0,0,0.1) !important; }
+
+/* === FORCE: pannello bandiere SCROLL e layout pulito (anche dark) === */
+#countryFlagsPanel {
+  scrollbar-width: thin !important;
+}
+#countryFlagsPanel button {
+  flex-shrink: 0 !important;
+  width: 30px !important;
+  height: 30px !important;
+}
+
+/* === Misc tweaks per uniformità === */
+.tachimetro, .tachimetro-pre-match, [class*="tachimetro"] {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 14px !important;
+}
+body.light-mode .tachimetro, body.light-mode [class*="tachimetro"] {
+  background: #fff !important;
+  border-color: rgba(0,0,0,0.08) !important;
+}
