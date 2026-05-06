@@ -11856,12 +11856,12 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       });
       
       return `
-        <div class="date-tabs">
-          <div class="date-tab live-tab ${state.liveMode ? 'active' : ''}" id="liveTab" onclick="toggleLiveMode()">
-            <span class="live-dot"></span> LIVE ${state.liveAlerts.length > 0 ? '<span class="live-badge-count">' + state.liveAlerts.length + '</span>' : ''}
+        <div class="date-tabs v9-date-tabs">
+          <div class="date-tab live-tab v9-date-tab live ${state.liveMode ? 'active' : ''}" id="liveTab" onclick="toggleLiveMode()">
+            <span class="live-dot v9-status-dot"></span> LIVE ${state.liveAlerts.length > 0 ? '<span class="live-badge-count">' + state.liveAlerts.length + '</span>' : ''}
           </div>
           ${[-1, 0, 1, 2].map(d => `
-            <div class="date-tab ${!state.liveMode && state.selectedDate === d ? 'active' : ''}" data-date="${d}">
+            <div class="date-tab v9-date-tab ${!state.liveMode && state.selectedDate === d ? 'active' : ''}" data-date="${d}">
               ${getDateLabel(d)} ${d !== 0 ? `(${formatDate(getDateString(d))})` : ''}
             </div>
           `).join('')}
@@ -11869,27 +11869,24 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         ${state.liveMode ? renderLiveSection() : `
         <!-- CAMPIONATI CON FILTRI -->
-        <div class="panel" style="margin-bottom: 16px;">
-          <div class="panel-title">📋 Campionati (${state.matches.length} partite)</div>
+        <div class="panel v9-leagues-panel" style="margin-bottom: 16px;">
+          <div class="v9-leagues-head">
+            <div class="title">
+              <span>📋 Campionati</span>
+            </div>
+            <div class="count-badge">${state.matches.length} partite</div>
+          </div>
           
-          <!-- FILTRI RAPIDI -->
-          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          <!-- FILTRI RAPIDI V9 -->
+          <div class="v9-filter-pills">
             ${filterBtns.filter(f => !f.key.startsWith('country:')).map(f => `
-              <button onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || f.label}" style="
-                padding:6px 12px;border-radius:20px;font-size:0.72rem;font-weight:700;cursor:pointer;
-                border:1.5px solid ${state.leagueFilter === f.key ? 'var(--accent-cyan)' : 'var(--border)'};
-                background:${state.leagueFilter === f.key ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)'};
-                color:${state.leagueFilter === f.key ? 'var(--accent-cyan)' : 'var(--text-gray)'};
-                white-space:nowrap;transition:all 0.2s;
-              ">${f.label}${f.count !== null ? ' (' + f.count + ')' : ''}</button>
+              <button class="v9-filter-pill ${state.leagueFilter === f.key ? 'active' : ''}" onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || f.label}">
+                ${f.label}${f.count !== null ? ' ' + f.count : ''}
+              </button>
             `).join('')}
-            <button onclick="(function(){ var el=document.getElementById('countryFlagsPanel'); if(el){el.style.display=el.style.display==='none'?'flex':'none';} })()" style="
-              padding:6px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;cursor:pointer;
-              border:1.5px solid ${state.leagueFilter.startsWith('country:') ? 'var(--accent-cyan)' : 'var(--border)'};
-              background:${state.leagueFilter.startsWith('country:') ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)'};
-              color:${state.leagueFilter.startsWith('country:') ? 'var(--accent-cyan)' : 'var(--text-gray)'};
-              white-space:nowrap;transition:all 0.2s;
-            ">${state.leagueFilter.startsWith('country:') ? (COUNTRY_FLAGS[state.leagueFilter.substring(8)] || '🏳️') + ' ' + state.leagueFilter.substring(8) : '🏳️ Nazioni ▾'}</button>
+            <button class="v9-filter-pill ${state.leagueFilter.startsWith('country:') ? 'active' : ''}" onclick="(function(){ var el=document.getElementById('countryFlagsPanel'); if(el){el.style.display=el.style.display==='none'?'flex':'none';} })()">
+              ${state.leagueFilter.startsWith('country:') ? (COUNTRY_FLAGS[state.leagueFilter.substring(8)] || '🏳️') + ' ' + state.leagueFilter.substring(8) : '🏳️ Nazioni ▾'}
+            </button>
           </div>
           <!-- BANDIERE NAZIONI (collassabile) -->
           <div id="countryFlagsPanel" style="display:${state.leagueFilter.startsWith('country:') ? 'flex' : 'none'};gap:5px;flex-wrap:wrap;margin-bottom:10px;padding:8px;background:rgba(0,0,0,0.15);border-radius:10px;border:1px solid var(--border);">
@@ -11909,21 +11906,28 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             </div>
           ` : `
             <!-- LISTA CAMPIONATI -->
-            <div style="display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+            <div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
               ${filtered.map(l => {
                 const isFav = state.favoriteLeagues.includes(l.id);
+                const isTop5 = ['Italy','England','Spain','Germany','France'].includes(l.country);
                 return `
-                <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:${isFav ? 'rgba(251,191,36,0.06)' : 'var(--bg-card)'};border:1px solid ${isFav ? 'rgba(251,191,36,0.2)' : 'var(--border)'};border-radius:10px;cursor:pointer;transition:all 0.15s;" onclick="selectLeague(${l.id})">
-                  <button onclick="event.stopPropagation();toggleFavoriteLeague(${l.id})" style="background:none;border:none;cursor:pointer;font-size:1.2rem;padding:4px;flex-shrink:0;opacity:${isFav ? '1' : '0.35'};" title="${isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}">
+                <div class="v9-league-row ${isFav ? 'fav' : ''}" onclick="selectLeague(${l.id})">
+                  <button class="v9-league-fav-btn ${isFav ? '' : 'off'}" onclick="event.stopPropagation();toggleFavoriteLeague(${l.id})" title="${isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}">
                     ${isFav ? '⭐' : '☆'}
                   </button>
-                  ${l.logo ? '<img src="' + l.logo + '" style="width:28px;height:28px;border-radius:4px;flex-shrink:0;" onerror="this.style.display=\'none\'">' : ''}
+                  ${l.logo ? '<img src="' + l.logo + '" style="width:28px;height:28px;border-radius:6px;flex-shrink:0;background:var(--bg-input);padding:2px;" onerror="this.style.display=\'none\'">' : '<div style="width:28px;height:28px;border-radius:50%;background:var(--bg-input);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;">' + (COUNTRY_FLAGS[l.country] || '🏳️') + '</div>'}
                   <div style="flex:1;min-width:0;">
-                    <div style="font-size:0.95rem;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(l.name)}</div>
-                    <div style="font-size:0.75rem;color:var(--text-dark);">${esc(l.country)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <span class="v9-league-name">${esc(l.name)}</span>
+                      ${isTop5 ? '<span style="font-size:8px;font-weight:700;padding:2px 6px;border-radius:4px;background:rgba(245,158,11,0.12);color:var(--accent-gold);letter-spacing:0.05em;">★ TOP 5</span>' : ''}
+                    </div>
+                    <div class="v9-league-meta">${esc(l.country)}</div>
                   </div>
-                  <div style="font-size:0.85rem;font-weight:800;color:var(--accent-cyan);flex-shrink:0;">${l.matchCount}</div>
-                  <span style="font-size:0.7rem;color:var(--text-dark);flex-shrink:0;">▶</span>
+                  <div style="text-align:right;flex-shrink:0;">
+                    <div class="v9-league-count">${l.matchCount}</div>
+                    <div class="v9-league-count-label">PARTITE</div>
+                  </div>
+                  <span class="v9-league-arrow">›</span>
                 </div>`;
               }).join('')}
             </div>
@@ -11933,27 +11937,27 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         <!-- COLPO DEL GIORNO -->
         ${renderColpoDelGiorno(picks)}
 
-        <!-- STATS BAR -->
-        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
-          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
-            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-cyan);">${state.matches.length}</div>
-            <div style="font-size:0.65rem;color:var(--text-dark);">Partite</div>
+        <!-- STATS BAR V9 -->
+        <div class="v9-stats-grid" style="margin-bottom:16px;border-top:none;padding-top:0;">
+          <div class="v9-stat-card">
+            <div class="v9-stat-num">${state.matches.length}</div>
+            <div class="v9-stat-label">Partite</div>
           </div>
-          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
-            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-green);">${state.leagues.length}</div>
-            <div style="font-size:0.65rem;color:var(--text-dark);">Campionati</div>
+          <div class="v9-stat-card">
+            <div class="v9-stat-num">${state.leagues.length}</div>
+            <div class="v9-stat-label">Campionati</div>
           </div>
-          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
-            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-gold);">${picks.matchAdvices.filter(a => a.confidence === 'high').length}</div>
-            <div style="font-size:0.65rem;color:var(--text-dark);">Alta Conf.</div>
+          <div class="v9-stat-card highlight-gold">
+            <div class="v9-stat-num">${picks.matchAdvices.filter(a => a.confidence === 'high').length}</div>
+            <div class="v9-stat-label">★ Massima</div>
           </div>
-          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
-            <div style="font-size:1.4rem;font-weight:800;color:#10b981;">${picks.matchAdvices.filter(a => a.dataQuality === 'high').length}</div>
-            <div style="font-size:0.65rem;color:var(--text-dark);">📊 HD</div>
+          <div class="v9-stat-card highlight">
+            <div class="v9-stat-num">${picks.matchAdvices.filter(a => a.dataQuality === 'high').length}</div>
+            <div class="v9-stat-label">📊 HD</div>
           </div>
-          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
-            <div style="font-size:1.4rem;font-weight:800;color:#a78bfa;">${picks.matchAdvices.length}</div>
-            <div style="font-size:0.65rem;color:var(--text-dark);">Analizzate</div>
+          <div class="v9-stat-card">
+            <div class="v9-stat-num">${picks.matchAdvices.length}</div>
+            <div class="v9-stat-label">Analizzate</div>
           </div>
         </div>
         
@@ -11985,60 +11989,63 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         if (d < 1440) return Math.floor(d/60) + 'h fa';
         return Math.floor(d/1440) + 'g fa';
       };
+      const wrColor = wr >= 60 ? 'var(--accent-emerald)' : (wr >= 45 ? 'var(--accent-yellow)' : 'var(--accent-red)');
       return `
-        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9000;display:flex;align-items:flex-start;justify-content:center;padding:20px;"
-             onclick="state.schedinaModal=false;render();">
-          <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:500px;max-height:85vh;overflow-y:auto;margin-top:60px;"
-               onclick="event.stopPropagation()">
-            <div style="padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
-              <div style="font-size:1.05rem;font-weight:800;color:var(--accent-gold);">&#x1F3AB; La Mia Schedina</div>
+        <div class="v9-schedina-overlay" onclick="state.schedinaModal=false;render();">
+          <div class="v9-schedina-modal" onclick="event.stopPropagation()">
+            <div class="v9-schedina-head">
+              <div class="v9-schedina-title">
+                &#x1F3AB; <span>La Mia Schedina</span>
+                <span class="v9-schedina-counter">${myBets.length}</span>
+              </div>
               <div style="display:flex;align-items:center;gap:10px;">
-                <div style="display:flex;gap:8px;">
-                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
-                    <div style="font-size:1rem;font-weight:800;color:var(--accent-green);">${won}</div>
-                    <div style="font-size:0.6rem;color:var(--text-dark);">Vinte</div>
+                <div class="v9-schedina-stats">
+                  <div class="v9-stat-pill won">
+                    <div class="num">${won}</div>
+                    <div class="lbl">Vinte</div>
                   </div>
-                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
-                    <div style="font-size:1rem;font-weight:800;color:var(--accent-red);">${lost}</div>
-                    <div style="font-size:0.6rem;color:var(--text-dark);">Perse</div>
+                  <div class="v9-stat-pill lost">
+                    <div class="num">${lost}</div>
+                    <div class="lbl">Perse</div>
                   </div>
-                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
-                    <div style="font-size:1rem;font-weight:800;color:var(--accent-yellow);">${pending}</div>
-                    <div style="font-size:0.6rem;color:var(--text-dark);">Attesa</div>
+                  <div class="v9-stat-pill pending">
+                    <div class="num">${pending}</div>
+                    <div class="lbl">Attesa</div>
                   </div>
                 </div>
-                <button onclick="state.schedinaModal=false;render();"
-                  style="background:transparent;border:1px solid var(--border);color:var(--text-gray);border-radius:50%;width:30px;height:30px;font-size:1.1rem;cursor:pointer;">&#x2715;</button>
+                <button class="v9-schedina-close" onclick="state.schedinaModal=false;render();">&#x2715;</button>
               </div>
             </div>
             <div style="padding:16px 20px;">
               ${completed > 0 ? `
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;background:var(--bg-input);padding:10px 14px;border-radius:10px;">
-                  <span style="font-size:0.8rem;font-weight:700;color:var(--text-gray);">Win Rate</span>
-                  <div style="flex:1;height:8px;background:rgba(255,255,255,0.1);border-radius:4px;overflow:hidden;">
-                    <div style="width:${wr}%;height:100%;border-radius:4px;background:${wr>=60?'var(--accent-green)':wr>=45?'var(--accent-yellow)':'var(--accent-red)'};transition:width 0.5s;"></div>
+                <div class="v9-winrate-strip">
+                  <span class="label">Win Rate</span>
+                  <div class="v9-winrate-bar">
+                    <div class="v9-winrate-fill" style="width:${wr}%;background:${wrColor};"></div>
                   </div>
-                  <span style="font-size:1.1rem;font-weight:800;color:${wr>=60?'var(--accent-green)':wr>=45?'var(--accent-yellow)':'var(--accent-red)'};">${wr.toFixed(0)}%</span>
+                  <span class="v9-winrate-pct" style="color:${wrColor};">${wr.toFixed(0)}%</span>
                 </div>
               ` : ''}
               ${myBets.length === 0 ? `
-                <div style="text-align:center;padding:30px;color:var(--text-gray);">
-                  <div style="font-size:2.5rem;margin-bottom:10px;">&#x1F4CB;</div>
-                  <div>Nessun pronostico tracciato.</div>
-                  <div style="font-size:0.78rem;margin-top:6px;">Clicca su una partita e aggiungi un pick alla schedina.</div>
+                <div class="v9-empty">
+                  <div class="icon">&#x1F4CB;</div>
+                  <div class="msg">Nessun pronostico tracciato</div>
+                  <div class="hint">Clicca su una partita e aggiungi un pick alla schedina.</div>
                 </div>
               ` : `
-                <div style="display:flex;flex-direction:column;gap:5px;">
+                <div class="v9-bet-list">
                   ${sorted.map(b => `
-                    <div class="schedina-item ${b.status}">
-                      <div class="schedina-item-left">
-                        <div class="schedina-item-match">${esc(b.matchName)}</div>
-                        <div class="schedina-item-info">${timeAgo(b.timestamp)} ${b.result ? '&bull; ' + b.result : '&bull; &#x23F3; In attesa'}</div>
+                    <div class="v9-bet-card ${b.status}">
+                      <div style="min-width:0;">
+                        <div class="v9-bet-match">${esc(b.matchName)}</div>
+                        <div class="v9-bet-info">${timeAgo(b.timestamp)} ${b.result ? '· ' + b.result : '· &#x23F3; In attesa'}</div>
                       </div>
-                      <div class="schedina-item-right">
-                        <div class="schedina-item-pick">${esc(b.pick)}</div>
-                        <span style="font-size:0.72rem;font-weight:700;color:var(--accent-cyan)">${b.prob != null && !isNaN(b.prob) ? parseFloat(b.prob).toFixed(0)+'%' : ''}</span>
-                        <div class="schedina-item-status">${b.status==='won'?'&#x2705;':b.status==='lost'?'&#x274C;':'&#x23F3;'}</div>
+                      <div class="v9-bet-right">
+                        <div style="text-align:right;">
+                          <div class="v9-bet-pick">${esc(b.pick)}</div>
+                          <div class="v9-bet-prob">${b.prob != null && !isNaN(b.prob) ? parseFloat(b.prob).toFixed(0)+'%' : ''}</div>
+                        </div>
+                        <div class="v9-bet-status">${b.status==='won'?'&#x2705;':b.status==='lost'?'&#x274C;':'&#x23F3;'}</div>
                       </div>
                     </div>
                   `).join('')}
