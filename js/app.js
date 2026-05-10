@@ -6,12 +6,13 @@
     // CONFIG
     // ============================================
     const CONFIG = {
+      // V9.1 SECURITY: Le chiavi API NON sono più nel browser.
+      // Tutte le chiamate passano dal Cloudflare Worker che aggiunge le chiavi server-side.
+      // Questo rende impossibile rubare le chiavi anche aprendo F12.
       API_FOOTBALL: {
-        key: 'aeb2864a3d4dbb8395fa53c83a876a93',
-        baseURL: 'https://v3.football.api-sports.io'
+        baseURL: 'https://bettingpro-ai.lucalagan.workers.dev/api-football'
       },
       FOOTYSTATS: {
-        key: 'bec59b6f83404b0bd79c40076be71f6f3abec62afdacf5eeba296f2357993f3e',
         baseURL: 'https://api.footystats.org'
       },
       FIREBASE: {
@@ -556,19 +557,89 @@
       }
     }
 
-    // --- Cache analisi (30 minuti) ---
+    // --- Cache analisi PERSISTENTE (V9.2) ---
+    // Sopravvive a refresh/chiusura browser via localStorage.
+    // Stesso TTL di 30 min. Capacity 30 partite (era 20).
+    // Risolve il bug "pronostico cambia alla riapertura" causato dalla cache
+    // che prima viveva solo in memoria e si perdeva ad ogni reload.
     const analysisCache = new Map();
     const CACHE_TTL = 30 * 60 * 1000;
+    const CACHE_STORAGE_KEY = 'bp_analysis_cache_v1';
+
+    // Ripristina cache salvata all'avvio (filtra entries scadute)
+    (function restoreAnalysisCache() {
+      try {
+        const raw = localStorage.getItem(CACHE_STORAGE_KEY);
+        if (!raw) return;
+        const obj = JSON.parse(raw);
+        const now = Date.now();
+        let restored = 0;
+        Object.keys(obj).forEach(k => {
+          const entry = obj[k];
+          if (entry && entry.ts && (now - entry.ts) <= CACHE_TTL) {
+            analysisCache.set(Number(k), entry);
+            restored++;
+          }
+        });
+        if (restored > 0) console.log('\u2705 Cache analisi ripristinata:', restored, 'partite');
+      } catch(e) {
+        console.warn('Cache restore failed:', e.message);
+        try { localStorage.removeItem(CACHE_STORAGE_KEY); } catch(_) {}
+      }
+    })();
+
+    // Persisti la cache su localStorage. Gestisce QuotaExceededError dimezzando.
+    function persistAnalysisCache() {
+      try {
+        const obj = {};
+        analysisCache.forEach((v, k) => { obj[k] = v; });
+        localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(obj));
+      } catch(e) {
+        if (e.name === 'QuotaExceededError' || /quota/i.test(e.message || '')) {
+          console.warn('Cache localStorage piena, riduco alle 10 piu\' recenti');
+          const keep = Array.from(analysisCache.entries())
+            .sort((a, b) => b[1].ts - a[1].ts)
+            .slice(0, 10);
+          analysisCache.clear();
+          keep.forEach(([k, v]) => analysisCache.set(k, v));
+          try {
+            const obj = {};
+            analysisCache.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(obj));
+          } catch(_) {
+            // Se anche dopo il taglio fallisce, pulisco tutto: meglio cache
+            // vuota che app rotta.
+            try { localStorage.removeItem(CACHE_STORAGE_KEY); } catch(__) {}
+          }
+        } else {
+          console.warn('Cache persist failed:', e.message);
+        }
+      }
+    }
+
     function getCachedAnalysis(matchId) {
       const e = analysisCache.get(matchId);
       if (!e) return null;
-      if (Date.now() - e.ts > CACHE_TTL) { analysisCache.delete(matchId); return null; }
+      if (Date.now() - e.ts > CACHE_TTL) {
+        analysisCache.delete(matchId);
+        persistAnalysisCache();
+        return null;
+      }
       console.log('\u2705 Cache hit:', matchId);
       return e.data;
     }
+
     function setCachedAnalysis(matchId, data) {
       analysisCache.set(matchId, { data, ts: Date.now() });
-      if (analysisCache.size > 20) analysisCache.delete(analysisCache.keys().next().value);
+      // Mantieni max 30 partite (FIFO sulla piu' vecchia)
+      if (analysisCache.size > 30) {
+        let oldestKey = null, oldestTs = Infinity;
+        analysisCache.forEach((v, k) => {
+          if (v.ts < oldestTs) { oldestTs = v.ts; oldestKey = k; }
+        });
+        if (oldestKey !== null) analysisCache.delete(oldestKey);
+      }
+      persistAnalysisCache();
     }
 
     // --- Fetch con retry + backoff esponenziale ---
@@ -3073,18 +3144,13 @@
     async function checkAPIStatus() {
       console.log('&#x1F50D; Controllo stato API...');
       
-      // Check API-Football - chiamata diretta senza proxy
-      // L'API api-sports.io supporta CORS con la chiave corretta
+      // Check API-Football tramite Worker (chiavi server-side, mai esposte al browser)
       try {
         const testUrl = `${CONFIG.API_FOOTBALL.baseURL}/status`;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 8000);
         
         const res = await fetch(testUrl, {
-          headers: {
-            'x-rapidapi-key': CONFIG.API_FOOTBALL.key,
-            'x-rapidapi-host': 'v3.football.api-sports.io'
-          },
           signal: controller.signal
         });
         clearTimeout(timeoutId);
@@ -3109,15 +3175,12 @@
 
     // === API CALLS ===
     async function callAPIFootball(endpoint, params = {}) {
+      // V9.1 SECURITY: chiamata via Worker, niente headers/chiavi lato client
       const url = new URL(CONFIG.API_FOOTBALL.baseURL + endpoint);
       Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
       try {
-        const res = await fetchWithRetry(url.toString(), {
-          headers: {
-            'x-rapidapi-key': CONFIG.API_FOOTBALL.key,
-            'x-rapidapi-host': 'v3.football.api-sports.io'
-          }
-        }, { retries: 3, baseDelay: 600, timeout: 15000, label: 'API-Football' });
+        const res = await fetchWithRetry(url.toString(), {}, 
+          { retries: 3, baseDelay: 600, timeout: 15000, label: 'API-Football' });
         const data = await res.json();
         if (state.api.football !== 'online') {
           state.api.football = 'online';
@@ -3595,19 +3658,16 @@
       render();
     }
 
-    // === FOOTYSTATS API — PRO plan: chiamata diretta supportata ===
+    // === FOOTYSTATS API via Worker (V9.1 SECURITY) ===
+    // Tutto passa dal Cloudflare Worker che aggiunge la chiave server-side.
+    // I proxy pubblici (CORSio, AllOrigins) sono stati rimossi perché senza chiave
+    // nel browser non potrebbero funzionare comunque.
     async function callFootyStats(endpoint, params = {}) {
-      const url = new URL(CONFIG.FOOTYSTATS.baseURL + endpoint);
-      url.searchParams.append('key', CONFIG.FOOTYSTATS.key);
+      const url = new URL('https://bettingpro-ai.lucalagan.workers.dev/footystats' + endpoint);
       Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
 
-      // Worker Cloudflare PRIMARIO per evitare errori CORS dal browser
-      // Direct rimosso (V8.1): il browser non può chiamare api.footystats.org direttamente per CORS policy
-      // Proxy pubblici come fallback se il Worker dovesse cadere
       const attempts = [
-        { url: 'https://bettingpro-ai.lucalagan.workers.dev/footystats?target=' + encodeURIComponent(url.toString()), label: 'FootyStats-Worker'  },
-        { url: 'https://corsproxy.io/?' + encodeURIComponent(url.toString()),                                  label: 'FootyStats-CORSio'  },
-        { url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url.toString()),                     label: 'FootyStats-AllOrigins' },
+        { url: url.toString(), label: 'FootyStats-Worker' }
       ];
 
       for (const attempt of attempts) {
@@ -4148,17 +4208,15 @@ async function analyzeMatch(match) {
           try {
             const oddsLab = await fetchOddsLab(match.id);
             state.oddsLab = oddsLab;
-            if (oddsLab) recordOddsSnapshot(match.id, oddsLab);
             if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
-            const dropSig1 = computeDroppingOddsSignal(match.id, oddsLab, new Date(match.date).getTime());
-            state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis, dropSig1);
+            state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
             render();
           } catch(e) {
             state.regressionScore = calculateRegressionScore(match, cached, null);
             const aiC = generateAIAdvice(match, cached);
-            state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis, null);
+            state.consensus = buildConsensusEngine(match, cached, aiC, null, state.regressionScore, null, state.superAnalysis);
             render();
           }
         })();
@@ -4276,8 +4334,19 @@ async function analyzeMatch(match) {
         homeFatigue, awayFatigue
       });
       state.analysis = validateAnalysisData(rawAnalysis);
-      // Salva in cache per riuso rapido
-      if (state.analysis) setCachedAnalysis(match.id, state.analysis);
+      // V9.2: Salva in cache SOLO se i dati core (statistiche squadre) sono presenti.
+      // Se entrambe le stats squadra sono null l'analisi e' degradata: meglio
+      // far rifare la chiamata API alla riapertura piuttosto che fissare per
+      // 30 min un pronostico costruito sui default. Previene il sintomo
+      // "il pronostico cambia alla chiusura/riapertura" tipico delle analisi
+      // create durante un fail/timeout API.
+      const hasCoreData = !!(homeStats && awayStats);
+      if (state.analysis && hasCoreData) {
+        setCachedAnalysis(match.id, state.analysis);
+      } else if (state.analysis) {
+        console.warn('\u26A0\uFE0F Analisi NON cachata: stats squadre mancanti '
+          + '(homeStats=' + !!homeStats + ', awayStats=' + !!awayStats + ')');
+      }
       
       // SALVA NELLO STORICO VARIAZIONI
       if (state.analysis) {
@@ -4305,7 +4374,6 @@ async function analyzeMatch(match) {
           console.log('🔬 v7: Fetching Odds Lab...');
           const oddsLab = await fetchOddsLab(match.id);
           state.oddsLab = oddsLab;
-          if (oddsLab) recordOddsSnapshot(match.id, oddsLab);
           
           // Value Bets (richiede oddsLab)
           if (oddsLab) {
@@ -4319,10 +4387,9 @@ async function analyzeMatch(match) {
           
           // Consensus Engine (richiede tutti i dati)
           const aiForConsensus = generateAIAdvice(match, state.analysis);
-          const dropSig3 = computeDroppingOddsSignal(match.id, oddsLab, new Date(match.date).getTime());
           state.consensus = buildConsensusEngine(
             match, state.analysis, aiForConsensus, oddsLab, state.regressionScore,
-            state.superAIAnalysis, state.superAnalysis, dropSig3
+            state.superAIAnalysis, state.superAnalysis
           );
           console.log('✅ v7: Consensus Engine:', state.consensus?.pick, state.consensus?.confidence);
           
@@ -4333,7 +4400,7 @@ async function analyzeMatch(match) {
           // Calcola comunque Regression e Consensus senza oddsLab
           state.regressionScore = calculateRegressionScore(match, state.analysis, null);
           const aiForConsensus = generateAIAdvice(match, state.analysis);
-          state.consensus = buildConsensusEngine(match, state.analysis, aiForConsensus, null, state.regressionScore, state.superAIAnalysis, state.superAnalysis, null);
+          state.consensus = buildConsensusEngine(match, state.analysis, aiForConsensus, null, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
           render();
         }
         return; // Già renderizzato sopra
@@ -7113,152 +7180,20 @@ async function analyzeMatch(match) {
     }
 
     // ============================================================
-    // 4-bis. DROPPING ODDS DETECTOR (V8)
-    // Storage client-side in localStorage. Snapshot quote per ogni match,
-    // detection di drop significativi come 4ª famiglia indipendente.
-    // ============================================================
-    
-    function recordOddsSnapshot(matchId, oddsLab) {
-      try {
-        if (!matchId || !oddsLab || !oddsLab.consensus) return;
-        const KEY = 'bp2_odds_snapshots';
-        const all = JSON.parse(localStorage.getItem(KEY) || '{}');
-        if (!all[matchId]) all[matchId] = [];
-        
-        const snap = {
-          t: Date.now(),
-          home: parseFloat(oddsLab.consensus.home.toFixed(1)),
-          draw: parseFloat(oddsLab.consensus.draw.toFixed(1)),
-          away: parseFloat(oddsLab.consensus.away.toFixed(1)),
-          over25: oddsLab.markets && oddsLab.markets.ou25 ? parseFloat(oddsLab.markets.ou25.impliedOver) : null,
-          btts: oddsLab.markets && oddsLab.markets.btts ? parseFloat(oddsLab.markets.btts.impliedYes) : null
-        };
-        
-        // Evita snapshot duplicati troppo ravvicinati (< 2h dall'ultimo)
-        const last = all[matchId][all[matchId].length - 1];
-        if (last && (snap.t - last.t) < 2 * 3600 * 1000) {
-          // Aggiorna l'ultimo invece di duplicare
-          all[matchId][all[matchId].length - 1] = snap;
-        } else {
-          all[matchId].push(snap);
-        }
-        
-        // Pulizia: max 30 snapshot per match
-        if (all[matchId].length > 30) all[matchId] = all[matchId].slice(-30);
-        
-        // Pulizia globale: rimuovi match con ultimo snapshot > 7 giorni
-        const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
-        Object.keys(all).forEach(mid => {
-          const arr = all[mid];
-          if (!arr || arr.length === 0 || arr[arr.length-1].t < cutoff) delete all[mid];
-        });
-        
-        localStorage.setItem(KEY, JSON.stringify(all));
-      } catch(e) {
-        console.warn('recordOddsSnapshot error:', e);
-      }
-    }
-    
-    function computeDroppingOddsSignal(matchId, currentOddsLab, matchTimestamp) {
-      try {
-        if (!matchId || !currentOddsLab || !currentOddsLab.consensus) return null;
-        const KEY = 'bp2_odds_snapshots';
-        const all = JSON.parse(localStorage.getItem(KEY) || '{}');
-        const history = all[matchId] || [];
-        if (history.length < 2) return null; // serve storico minimo
-        
-        const current = currentOddsLab.consensus;
-        const now = Date.now();
-        
-        // === FINESTRA ADATTIVA basata su tempo al kickoff ===
-        // Lo "smart money" entra spesso nelle ultime ore. Se il match è imminente,
-        // confrontiamo con uno snapshot più vicino per cogliere il movimento finale.
-        let lookbackHours = 12; // default: partita lontana o data sconosciuta
-        if (matchTimestamp) {
-          const msToMatch = matchTimestamp - now;
-          const hoursToMatch = msToMatch / 3600000;
-          if (hoursToMatch < 0) return null; // partita già iniziata o passata
-          if (hoursToMatch < 3)        lookbackHours = 2;   // imminente: cattura formazioni ufficiali
-          else if (hoursToMatch < 12)  lookbackHours = 4;   // entro mezza giornata
-          else if (hoursToMatch < 36)  lookbackHours = 8;   // entro 1.5 giorni
-          else                         lookbackHours = 12;  // partita lontana
-        }
-        
-        // Trova il PIÙ RECENTE snapshot che sia ALMENO lookbackHours fa
-        // (così il drop riflette il movimento dell'ultima finestra utile)
-        const minOldT = now - lookbackHours * 3600 * 1000;
-        const candidates = history.filter(s => s.t <= minOldT);
-        const oldSnap = candidates.length > 0
-          ? candidates[candidates.length - 1]  // il più recente fra i "vecchi"
-          : history[0];                        // fallback: il più vecchio disponibile
-        const hoursElapsed = (now - oldSnap.t) / 3600000;
-        
-        // Se il "vecchio" snapshot è troppo recente rispetto alla finestra ottimale,
-        // segnaliamo ma con confidence ridotta più avanti.
-        const windowQuality = Math.min(1, hoursElapsed / lookbackHours);
-        
-        // Drop = aumento prob implicita (= quote scendono = soldi entrano)
-        const drops = [
-          { pick: '1', delta: current.home - oldSnap.home, currentProb: current.home },
-          { pick: 'X', delta: current.draw - oldSnap.draw, currentProb: current.draw },
-          { pick: '2', delta: current.away - oldSnap.away, currentProb: current.away }
-        ];
-        
-        // Aggiungi drops Over 2.5 / BTTS se disponibili
-        if (currentOddsLab.markets && currentOddsLab.markets.ou25 && oldSnap.over25 != null) {
-          const curOver = parseFloat(currentOddsLab.markets.ou25.impliedOver);
-          drops.push({ pick: 'Over 2.5', delta: curOver - oldSnap.over25, currentProb: curOver });
-        }
-        if (currentOddsLab.markets && currentOddsLab.markets.btts && oldSnap.btts != null) {
-          const curBtts = parseFloat(currentOddsLab.markets.btts.impliedYes);
-          drops.push({ pick: 'GG', delta: curBtts - oldSnap.btts, currentProb: curBtts });
-        }
-        
-        // Trova drop più significativo
-        drops.sort((a,b) => b.delta - a.delta);
-        const top = drops[0];
-        
-        // Soglia: drop >= 4 punti percentuali (+ filtro: il pick attualmente deve avere prob >= 35)
-        if (top.delta < 4 || top.currentProb < 35) return null;
-        
-        // Confidence proporzionale al drop, scalata per windowQuality
-        let confidence = 55;
-        if (top.delta >= 8) confidence = 65;
-        if (top.delta >= 12) confidence = 75;
-        if (top.delta >= 16) confidence = 82;
-        // Se la finestra è di scarsa qualità (storico troppo recente), riduci confidence
-        confidence = Math.round(confidence * (0.7 + 0.3 * windowQuality));
-        
-        return {
-          pick: top.pick,
-          confidence: confidence,
-          delta: top.delta.toFixed(1),
-          currentProb: top.currentProb.toFixed(1),
-          hoursElapsed: hoursElapsed.toFixed(1),
-          oldProb: (top.currentProb - top.delta).toFixed(1),
-          lookbackHours: lookbackHours,
-          windowQuality: windowQuality.toFixed(2)
-        };
-      } catch(e) {
-        console.warn('computeDroppingOddsSignal error:', e);
-        return null;
-      }
-    }
-    
-    // ============================================================
     // 4. CONSENSUS ENGINE — Fusione intelligente di tutte le fonti
     // ============================================================
-    function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo, dropSignal) {
+    function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo) {
       if (!analysis) return null;
       
       const sources = [];
-      const pickVotes = {}; // { 'pick': { count, totalWeight, sources } } — mantenuto per backward compat
+      const pickVotes = {}; // { 'pick': { count, totalWeight, sources } }
       
-      // Funzione helper per aggiungere un voto (ora con tag famiglia)
-      function addVote(name, pick, prob, weight, icon, family) {
+      // Funzione helper per aggiungere un voto
+      function addVote(name, pick, prob, weight, icon) {
         if (!pick || pick === 'N/A') return;
+        // Normalizza pick AGGRESSIVO — mappa tutte le varianti allo stesso pick canonico
         const normalizedPick = normalizePick(pick);
-        const src = { name, pick: normalizedPick, prob: parseFloat(prob) || 0, weight, icon, family };
+        const src = { name, pick: normalizedPick, prob: parseFloat(prob) || 0, weight, icon };
         sources.push(src);
         
         if (!pickVotes[normalizedPick]) pickVotes[normalizedPick] = { count: 0, totalWeight: 0, maxProb: 0, sources: [] };
@@ -7271,12 +7206,18 @@ async function analyzeMatch(match) {
       function normalizePick(raw) {
         if (!raw) return raw;
         const p = raw.trim().toLowerCase();
+        
+        // === Double Chance (PRIMA di X per evitare che "1x casa o pareggio" matchi "pareggio" → X) ===
         if (/^1x(\s|\(|$)/i.test(p) || p === '1x' || p.includes('casa o pareggio') || p.includes('1x (')) return '1X';
         if (/^x2(\s|\(|$)/i.test(p) || p === 'x2' || p.includes('pareggio o ospite') || p.includes('x2 (')) return 'X2';
         if (/^12(\s|$)/i.test(p) || p === '12' || p.includes('no pareggio')) return '12';
+        
+        // === 1X2 ===
         if (/^1(\s|\(|$)/.test(p) || p.includes('vittoria casa') || p.includes('casa vince') || p.includes('home win')) return '1';
         if (/^2(\s|\(|$)/.test(p) || p.includes('vittoria ospite') || p.includes('ospite vince') || p.includes('away win')) return '2';
         if (/^x(\s|\(|$)/.test(p) || p === 'pareggio' || p === 'x (pareggio)' || p === 'draw') return 'X';
+        
+        // === Over/Under ===
         if (/over\s*0\.?5/i.test(p)) return 'Over 0.5';
         if (/over\s*1\.?5/i.test(p)) return 'Over 1.5';
         if (/over\s*2\.?5/i.test(p)) return 'Over 2.5';
@@ -7285,175 +7226,93 @@ async function analyzeMatch(match) {
         if (/under\s*1\.?5/i.test(p)) return 'Under 1.5';
         if (/under\s*2\.?5/i.test(p)) return 'Under 2.5';
         if (/under\s*3\.?5/i.test(p)) return 'Under 3.5';
+        
+        // === GG/NG ===
         if (p === 'gg' || p.includes('gol gol') || p.includes('both teams') || p.includes('btts') || p.includes('entrambe segnano')) return 'GG';
         if (p === 'ng' || p === 'no gol' || p.includes('no gol') || p.includes('no goal')) return 'NG';
+        
+        // Fallback
         return raw.trim();
       }
       
-      // ============================================================
-      // RACCOLTA VOTI con TAG FAMIGLIA (3 famiglie indipendenti)
-      // ============================================================
+      // 1. Modello Poisson/Dixon-Coles (peso 3)
+      if (ai && ai.pick) {
+        addVote('Poisson AI', ai.pick, ai.prob, 3, '🎯');
+      }
       
-      // FAMIGLIA xG — modelli predittivi statistici basati su Expected Goals
-      if (ai && ai.pick) addVote('Poisson AI', ai.pick, ai.prob, 3, '🎯', 'xg');
-      if (superAI && !superAI.error && superAI.bestPick) addVote('Oracle AI', superAI.bestPick, superAI.confidence || 60, 2, '🔮', 'xg');
-      if (superAlgo && superAlgo.topPick) addVote('Super Algo', superAlgo.topPick.value, superAlgo.topPick.prob, 2, '⚡', 'xg');
-      
-      // FAMIGLIA MARKET — segnali del mercato bookmaker
+      // 2. Bookmaker consensus (peso 3)
       if (oddsLab && oddsLab.consensus) {
         const c = oddsLab.consensus;
         const maxP = Math.max(c.home, c.draw, c.away);
         const bkPick = c.home === maxP ? '1' : (c.away === maxP ? '2' : 'X');
-        addVote('Bookmakers', bkPick, maxP, 3, '💰', 'market');
+        addVote('Bookmakers', bkPick, maxP, 3, '💰');
       } else if (analysis.bookmakerOdds) {
         const b = analysis.bookmakerOdds;
         const maxP = Math.max(b.home, b.draw, b.away);
         const bkPick = b.home === maxP ? '1' : (b.away === maxP ? '2' : 'X');
-        addVote('Bookmaker', bkPick, maxP, 2.5, '💰', 'market');
+        addVote('Bookmaker', bkPick, maxP, 2.5, '💰');
       }
-      if (oddsLab && oddsLab.steamMoves && oddsLab.steamMoves.length > 0) {
+      
+      // 3. Regression Score (peso 2)
+      if (regressionResult && regressionResult.score >= 55) {
+        const rPick = regressionResult.favIs === 'home' ? '1' : '2';
+        addVote('Regressione', rPick, regressionResult.score, 2, '📊');
+      }
+      
+      // 4. Super AI con news (peso 2)
+      if (superAI && !superAI.error && superAI.bestPick) {
+        addVote('Oracle AI', superAI.bestPick, superAI.confidence || 60, 2, '🔮');
+      }
+      
+      // 5. Super Algoritmo locale (peso 2)
+      if (superAlgo && superAlgo.topPick) {
+        addVote('Super Algo', superAlgo.topPick.value, superAlgo.topPick.prob, 2, '⚡');
+      }
+      
+      // 6. Steam Move (peso 1.5)
+      if (oddsLab && oddsLab.steamMoves.length > 0) {
         const bullish = oddsLab.steamMoves.find(s => s.type === 'bullish');
         if (bullish) {
           const steamPick = bullish.direction === 'home' ? '1' : '2';
-          addVote('Smart Money', steamPick, 65, 1.5, '🔥', 'market');
+          addVote('Smart Money', steamPick, 65, 1.5, '🔥');
         }
       }
       
-      // FAMIGLIA META — segnali strutturali/storici
-      if (regressionResult && regressionResult.score >= 55) {
-        const rPick = regressionResult.favIs === 'home' ? '1' : '2';
-        addVote('Regressione', rPick, regressionResult.score, 2, '📊', 'meta');
-      }
+      // Trova il pick con il peso cumulativo più alto
+      const sortedPicks = Object.entries(pickVotes)
+        .map(([pick, data]) => ({ pick, ...data, score: data.totalWeight * (data.maxProb / 100) * data.count }))
+        .sort((a, b) => b.score - a.score);
       
-      // FAMIGLIA DROPS — movimento storico delle quote (smart money detection)
-      if (dropSignal && dropSignal.confidence >= 55) {
-        addVote('Drop Detector', dropSignal.pick, dropSignal.confidence, 2, '📉', 'drops');
-      }
+      if (sortedPicks.length === 0) return null;
       
-      if (sources.length === 0) return null;
-      
-      // ============================================================
-      // AGGREGAZIONE PER FAMIGLIA — ogni famiglia produce 1 solo voto
-      // (così i modelli correlati non gonfiano il count)
-      // ============================================================
-      const FAMILIES = ['xg', 'market', 'meta', 'drops'];
-      const familyVotes = []; // [{ family, pick, prob, weight, contributors }]
-      
-      FAMILIES.forEach(fam => {
-        const famSources = sources.filter(s => s.family === fam);
-        if (famSources.length === 0) return;
-        
-        // All'interno della famiglia, raggruppo per pick e calcolo peso totale
-        const famPicks = {};
-        famSources.forEach(s => {
-          if (!famPicks[s.pick]) famPicks[s.pick] = { weightedProb: 0, totalWeight: 0, contributors: [] };
-          famPicks[s.pick].weightedProb += s.prob * s.weight;
-          famPicks[s.pick].totalWeight += s.weight;
-          famPicks[s.pick].contributors.push(s.name);
-        });
-        
-        // Pick rappresentante della famiglia = quello con peso totale più alto
-        const famPickEntries = Object.entries(famPicks)
-          .map(([pick, d]) => ({ 
-            pick, 
-            prob: d.weightedProb / d.totalWeight, 
-            totalWeight: d.totalWeight, 
-            contributors: d.contributors 
-          }))
-          .sort((a, b) => b.totalWeight - a.totalWeight);
-        
-        const famWinner = famPickEntries[0];
-        familyVotes.push({
-          family: fam,
-          pick: famWinner.pick,
-          prob: famWinner.prob,
-          weight: famWinner.totalWeight,
-          contributors: famWinner.contributors
-        });
-      });
-      
-      // ============================================================
-      // PICK GLOBALE — accordo TRA famiglie (segnali davvero indipendenti)
-      // ============================================================
-      const familyPickGroups = {}; // { pick: [familyVote, ...] }
-      familyVotes.forEach(fv => {
-        if (!familyPickGroups[fv.pick]) familyPickGroups[fv.pick] = [];
-        familyPickGroups[fv.pick].push(fv);
-      });
-      
-      // Ranking pick per: 1) numero famiglie d'accordo, 2) prob ponderata
-      const pickRanking = Object.entries(familyPickGroups).map(([pick, fams]) => {
-        const totalW = fams.reduce((s, f) => s + f.weight, 0);
-        const weightedProb = fams.reduce((s, f) => s + f.prob * f.weight, 0) / totalW;
-        return { 
-          pick, 
-          familyCount: fams.length, 
-          families: fams.map(f => f.family), 
-          prob: weightedProb, 
-          totalWeight: totalW 
-        };
-      }).sort((a, b) => {
-        if (b.familyCount !== a.familyCount) return b.familyCount - a.familyCount;
-        return b.prob - a.prob;
-      });
-      
-      const winner = pickRanking[0];
-      const totalActiveFamilies = familyVotes.length;
-      
-      // ============================================================
-      // CONFIDENCE CALIBRATA — basata su famiglie INDIPENDENTI d'accordo
-      // (NON più sul count grezzo dei voti correlati)
-      // ============================================================
-      let confidence = 'BASSA', confidenceColor = '#f87171';
-      
-      if (winner.familyCount >= 3 && winner.prob >= 65) {
-        // Tutte e 3 le famiglie d'accordo + alta probabilità = oro puro
-        confidence = 'MASSIMA'; confidenceColor = '#00e5a0';
-      } else if (winner.familyCount >= 2 && winner.prob >= 60 && totalActiveFamilies >= 2) {
-        // 2+ famiglie indipendenti d'accordo + buona probabilità
-        confidence = 'ALTA'; confidenceColor = '#00d4ff';
-      } else if (winner.familyCount >= 2 && winner.prob >= 52) {
-        // 2 famiglie d'accordo ma prob non eccezionale
-        confidence = 'MEDIA'; confidenceColor = '#fbbf24';
-      } else if (winner.familyCount === 1 && winner.prob >= 65 && totalActiveFamilies === 1) {
-        // Una sola famiglia attiva ma prob molto alta — può essere MEDIA, mai più
-        confidence = 'MEDIA'; confidenceColor = '#fbbf24';
-      } else {
-        // Famiglie discordi o segnale debole
-        confidence = 'BASSA'; confidenceColor = '#f87171';
-      }
-      
-      // ============================================================
-      // OUTPUT — backward compatible con tutto il downstream
-      // ============================================================
+      const winner = sortedPicks[0];
       const totalSources = sources.length;
       const agreeSources = sources.filter(s => s.pick === winner.pick).length;
-      // agreement ora rappresenta % famiglie d'accordo (più informativo del raw count)
-      const familyAgreement = totalActiveFamilies > 0 ? (winner.familyCount / totalActiveFamilies * 100) : 0;
+      const agreement = totalSources > 0 ? (agreeSources / totalSources * 100) : 0;
+      
+      // Confidence calibrata
+      let confidence = 'medium', confidenceColor = '#fbbf24';
+      if (agreement >= 80 && winner.maxProb >= 60) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
+      else if (agreement >= 60 && winner.maxProb >= 55) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
+      else if (agreement >= 40) { confidence = 'MEDIA'; confidenceColor = '#fbbf24'; }
+      else { confidence = 'BASSA'; confidenceColor = '#f87171'; }
+      
+      // Calcola prob ponderata
+      const agreeingSources = sources.filter(s => s.pick === winner.pick);
+      let weightedProb = 0, sumWeights = 0;
+      agreeingSources.forEach(s => { weightedProb += s.prob * s.weight; sumWeights += s.weight; });
+      const finalProb = sumWeights > 0 ? weightedProb / sumWeights : winner.maxProb;
       
       return {
         pick: winner.pick,
-        prob: winner.prob.toFixed(1),
+        prob: finalProb.toFixed(1),
         confidence,
         confidenceColor,
-        agreement: familyAgreement.toFixed(0),
+        agreement: agreement.toFixed(0),
         agreeSources,
         totalSources,
         sources: sources.map(s => ({ ...s, agrees: s.pick === winner.pick })),
-        alternatives: pickRanking.slice(1, 3).map(p => ({ 
-          pick: p.pick, 
-          sources: p.familyCount, 
-          prob: p.prob.toFixed(0) 
-        })),
-        // NUOVI campi diagnostici (non rompono il downstream esistente)
-        familyVotes: familyVotes.map(f => ({ 
-          family: f.family, 
-          pick: f.pick, 
-          prob: f.prob.toFixed(0), 
-          contributors: f.contributors 
-        })),
-        activeFamilies: totalActiveFamilies,
-        winnerFamilies: winner.familyCount
+        alternatives: sortedPicks.slice(1, 3).map(p => ({ pick: p.pick, sources: p.count, prob: p.maxProb.toFixed(0) }))
       };
     }
 
@@ -7570,55 +7429,17 @@ async function analyzeMatch(match) {
         </div>
       `).join('');
       
-      // Badge Drop Detector se la famiglia drops è attiva (V9 styling)
-      const dropFamily = (consensus.familyVotes || []).find(f => f.family === 'drops');
-      let dropBadge = '';
-      if (dropFamily) {
-        const agreesWithMain = dropFamily.pick === consensus.pick;
-        const bannerClass = agreesWithMain ? 'confirms' : 'contradicts';
-        const icon = agreesWithMain ? '📉' : '⚠️';
-        const label = agreesWithMain ? 'SMART MONEY conferma' : 'DRIFT BOOK contrario';
-        dropBadge = `<div class="v9-drop-banner ${bannerClass}">
-          <span style="font-size:14px;">${icon}</span>
-          <span class="v9-drop-banner-label">${label}</span>
-          <span class="v9-drop-banner-meta">→ ${dropFamily.pick} ${dropFamily.prob}%</span>
-        </div>`;
-      }
-      
-      // Pillole famiglie V9 (sostituiscono le source cards)
-      const familyPills = (consensus.familyVotes || []).map(fv => {
-        const agrees = fv.pick === consensus.pick;
-        const famIcon = fv.family === 'xg' ? '🎯' : fv.family === 'market' ? '💰' : fv.family === 'meta' ? '📊' : '📉';
-        const famLabel = fv.family === 'xg' ? 'xG' : fv.family === 'market' ? 'Market' : fv.family === 'meta' ? 'Meta' : 'Drops';
-        return `<div class="v9-family-pill ${agrees ? 'agrees' : 'disagrees'}" title="${fv.contributors.join(', ')}">
-          <div class="v9-family-name">${famIcon} ${famLabel}</div>
-          <div class="v9-family-pick">${fv.pick}</div>
-          <div class="v9-family-prob">${fv.prob}%</div>
-        </div>`;
-      }).join('');
-      
-      // Tier class per il pannello
-      const tierLower = (consensus.confidence || '').toLowerCase();
-      const winnerCount = consensus.winnerFamilies || consensus.agreeSources || 0;
-      const activeCount = consensus.activeFamilies || consensus.totalSources || 0;
-      
-      return `<div class="consensus-panel v9-consensus-panel tier-${tierLower}">
-        <div class="v9-consensus-head">
-          <div class="v9-consensus-title">⚡ Consensus Engine · ${activeCount} famiglie</div>
-          <div class="v9-consensus-agreement" style="color:${consensus.confidenceColor};">${winnerCount}/${activeCount} accordo</div>
-        </div>
-        <div class="v9-consensus-pick" style="color:${consensus.confidenceColor};">🏆 ${consensus.pick}</div>
-        <div class="v9-consensus-confidence">
-          <span class="conf-label" style="color:${consensus.confidenceColor};">${consensus.confidence}</span>
-          <span style="opacity:0.5;margin:0 6px;">·</span>
-          <span>Prob ${consensus.prob}%</span>
+      return `<div class="consensus-panel">
+        <div style="font-size:0.62rem;color:var(--text-dark);text-align:center;">CONSENSUS ENGINE • ${consensus.totalSources} fonti analizzate</div>
+        <div class="consensus-pick" style="color:${consensus.confidenceColor};">🏆 ${consensus.pick}</div>
+        <div class="consensus-confidence">
+          <span style="color:${consensus.confidenceColor};font-weight:800;">${consensus.confidence}</span> • Prob: ${consensus.prob}% • Accordo: ${consensus.agreement}% (${consensus.agreeSources}/${consensus.totalSources})
         </div>
         <div class="consensus-meter">
           <div class="consensus-meter-fill" style="width:${consensus.agreement}%;background:${consensus.confidenceColor};"></div>
         </div>
-        <div class="v9-families-grid">${familyPills || srcCards}</div>
-        ${dropBadge}
-        ${consensus.alternatives.length > 0 ? `<div style="margin-top:10px;font-size:11px;color:var(--text-dark);text-align:center;">Alternative: ${consensus.alternatives.map(a => `<span style="color:var(--text-gray);font-weight:600;">${a.pick}</span> <span style="font-family:'JetBrains Mono',monospace;font-size:10px;">(${a.sources} famiglie, ${a.prob}%)</span>`).join(' · ')}</div>` : ''}
+        <div class="consensus-sources">${srcCards}</div>
+        ${consensus.alternatives.length > 0 ? `<div style="margin-top:8px;font-size:0.62rem;color:var(--text-dark);">Alternative: ${consensus.alternatives.map(a => a.pick + ' (' + a.sources + ' fonti, ' + a.prob + '%)').join(' • ')}</div>` : ''}
       </div>`;
     }
 
@@ -10250,46 +10071,48 @@ async function analyzeMatch(match) {
 
     function renderHeader() {
       const userDisplay = authState.isLoggedIn 
-        ? `<div class="v9-user-pill" title="${authState.email}">&#x1F464; ${authState.email.split('@')[0]}</div>`
+        ? `<span class="user-email" title="${authState.email}">&#x1F464; ${authState.email.split('@')[0]}</span>`
         : '';
       
-      const apiOk = state.api.football === 'online';
-      const statsOk = state.api.footystats === 'online';
-      const cloudOk = firebaseEnabled;
-      
       return `
-        <header class="v9-header">
-          <div class="v9-brand-cluster">
-            <div class="v9-brand-icon">⚽</div>
-            <div>
-              <div class="v9-brand-name">BettingPro</div>
-              <div class="v9-brand-version">v9.0 · 4 famiglie</div>
+        <header class="header">
+          <div class="header-inner">
+            <div class="brand">
+              <div class="brand-icon">⚽</div>
+              <span class="brand-name">BettingPro</span>
             </div>
-          </div>
-          <div class="v9-status-cluster">
-            <div class="v9-status-pill ${apiOk ? '' : 'offline'}" title="API-Football">
-              <span class="v9-status-dot"></span>API
-            </div>
-            <div class="v9-status-pill ${statsOk ? '' : 'offline'}" title="FootyStats">
-              <span class="v9-status-dot"></span>Stats
-            </div>
-            <div class="v9-status-pill ${cloudOk ? '' : 'offline'}" title="Firebase Cloud Storage">
-              <span class="v9-status-dot"></span>Cloud
-            </div>
-            ${userDisplay}
-            <button class="v9-action-btn ghost" onclick="toggleTheme()" title="Cambia tema" id="themeBtn">
-              ${document.body.classList.contains('light-mode') ? '☀️' : '🌙'}
-            </button>
-            <button class="v9-action-btn ghost" onclick="showPerformance()" title="Performance &amp; Analytics">📊</button>
-            <button class="v9-action-btn ghost" onclick="toggleSettingsPanel()" title="Impostazioni">⚙️</button>
-            <button class="v9-action-btn ${authState.isLoggedIn ? 'ghost' : 'success'}" onclick="${authState.isLoggedIn ? 'firebaseLogout()' : 'toggleLoginModal()'}" title="${authState.isLoggedIn ? 'Esci' : 'Accedi per sincronizzare su tutti i dispositivi'}">
-              ${authState.isLoggedIn ? '&#x1F6AA; Esci' : '&#x1F510; Accedi'}
-            </button>
-            <button class="v9-action-btn warning" onclick="state.schedinaModal=true;render();">
-              &#x1F3AB; Schedina (${state.trackedBets.length})
-            </button>
-            <div class="slip-badge" id="openSlip">
-              &#x1F3AB; ${state.slip.length} pronostici
+            <div class="header-right">
+              <button onclick="toggleTheme()" title="Cambia tema" style="background:none;border:1px solid var(--border);border-radius:8px;padding:5px 9px;cursor:pointer;font-size:0.85rem;color:var(--text-gray);transition:all 0.2s;" id="themeBtn">
+                ${document.body.classList.contains('light-mode') ? '☀️' : '🌙'}
+              </button>
+              <div class="status-bar">
+                <div class="status-item">
+                  <span class="status-dot ${state.api.football}"></span>
+                  <span>API</span>
+                </div>
+                <div class="status-item">
+                  <span class="status-dot ${state.api.footystats}"></span>
+                  <span>Stats</span>
+                </div>
+                <div class="status-item" title="Firebase Cloud Storage">
+                  <span class="status-dot ${firebaseEnabled ? 'online' : 'offline'}"></span>
+                  <span>Cloud</span>
+                </div>
+              </div>
+              ${userDisplay}
+              <button class="auth-btn ${authState.isLoggedIn ? 'logged-in' : ''}" onclick="${authState.isLoggedIn ? 'firebaseLogout()' : 'toggleLoginModal()'}" title="${authState.isLoggedIn ? 'Esci' : 'Accedi per sincronizzare su tutti i dispositivi'}">
+                ${authState.isLoggedIn ? '&#x1F6AA; Esci' : '&#x1F510; Accedi'}
+              </button>
+              <button class="settings-btn" onclick="showPerformance()" title="Performance & Analytics">
+                &#x1F4CA;
+              </button>
+              <button class="settings-btn" onclick="toggleSettingsPanel()" title="Impostazioni">
+                ⚙️
+              </button>
+              <button class="schedina-btn" onclick="state.schedinaModal=true;render();" style="padding:6px 12px;border-radius:20px;border:1.5px solid var(--accent-gold);background:transparent;color:var(--accent-gold);font-size:0.75rem;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;">&#x1F3AB; Schedina (${state.trackedBets.length})</button>
+              <div class="slip-badge" id="openSlip">
+                &#x1F3AB; ${state.slip.length} pronostici
+              </div>
             </div>
           </div>
         </header>
@@ -11856,12 +11679,12 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       });
       
       return `
-        <div class="date-tabs v9-date-tabs">
-          <div class="date-tab live-tab v9-date-tab live ${state.liveMode ? 'active' : ''}" id="liveTab" onclick="toggleLiveMode()">
-            <span class="live-dot v9-status-dot"></span> LIVE ${state.liveAlerts.length > 0 ? '<span class="live-badge-count">' + state.liveAlerts.length + '</span>' : ''}
+        <div class="date-tabs">
+          <div class="date-tab live-tab ${state.liveMode ? 'active' : ''}" id="liveTab" onclick="toggleLiveMode()">
+            <span class="live-dot"></span> LIVE ${state.liveAlerts.length > 0 ? '<span class="live-badge-count">' + state.liveAlerts.length + '</span>' : ''}
           </div>
           ${[-1, 0, 1, 2].map(d => `
-            <div class="date-tab v9-date-tab ${!state.liveMode && state.selectedDate === d ? 'active' : ''}" data-date="${d}">
+            <div class="date-tab ${!state.liveMode && state.selectedDate === d ? 'active' : ''}" data-date="${d}">
               ${getDateLabel(d)} ${d !== 0 ? `(${formatDate(getDateString(d))})` : ''}
             </div>
           `).join('')}
@@ -11869,27 +11692,30 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         ${state.liveMode ? renderLiveSection() : `
         <!-- CAMPIONATI CON FILTRI -->
-        <div class="panel v9-leagues-panel" style="margin-bottom: 16px;">
-          <div class="v9-leagues-head">
-            <div class="title">
-              <span>📋 Campionati</span>
-            </div>
-            <div class="count-badge">${state.matches.length} partite</div>
-          </div>
+        <div class="panel" style="margin-bottom: 16px;">
+          <div class="panel-title">📋 Campionati (${state.matches.length} partite)</div>
           
-          <!-- FILTRI RAPIDI V9 -->
-          <div class="v9-filter-pills">
+          <!-- FILTRI RAPIDI -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
             ${filterBtns.filter(f => !f.key.startsWith('country:')).map(f => `
-              <button class="v9-filter-pill ${state.leagueFilter === f.key ? 'active' : ''}" onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || f.label}">
-                ${f.label}${f.count !== null ? ' ' + f.count : ''}
-              </button>
+              <button onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || f.label}" style="
+                padding:6px 12px;border-radius:20px;font-size:0.72rem;font-weight:700;cursor:pointer;
+                border:1.5px solid ${state.leagueFilter === f.key ? 'var(--accent-cyan)' : 'var(--border)'};
+                background:${state.leagueFilter === f.key ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)'};
+                color:${state.leagueFilter === f.key ? 'var(--accent-cyan)' : 'var(--text-gray)'};
+                white-space:nowrap;transition:all 0.2s;
+              ">${f.label}${f.count !== null ? ' (' + f.count + ')' : ''}</button>
             `).join('')}
-            <button class="v9-filter-pill ${state.leagueFilter.startsWith('country:') ? 'active' : ''}" onclick="(function(){ var el=document.getElementById('countryFlagsPanel'); if(el){el.style.display=el.style.display==='none'?'flex':'none';} })()">
-              ${state.leagueFilter.startsWith('country:') ? (COUNTRY_FLAGS[state.leagueFilter.substring(8)] || '🏳️') + ' ' + state.leagueFilter.substring(8) : '🏳️ Nazioni ▾'}
-            </button>
+            <button onclick="(function(){ var el=document.getElementById('countryFlagsPanel'); if(el){el.style.display=el.style.display==='none'?'flex':'none';} })()" style="
+              padding:6px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;cursor:pointer;
+              border:1.5px solid ${state.leagueFilter.startsWith('country:') ? 'var(--accent-cyan)' : 'var(--border)'};
+              background:${state.leagueFilter.startsWith('country:') ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)'};
+              color:${state.leagueFilter.startsWith('country:') ? 'var(--accent-cyan)' : 'var(--text-gray)'};
+              white-space:nowrap;transition:all 0.2s;
+            ">${state.leagueFilter.startsWith('country:') ? (COUNTRY_FLAGS[state.leagueFilter.substring(8)] || '🏳️') + ' ' + state.leagueFilter.substring(8) : '🏳️ Nazioni ▾'}</button>
           </div>
           <!-- BANDIERE NAZIONI (collassabile) -->
-          <div id="countryFlagsPanel" style="display:${state.leagueFilter.startsWith('country:') ? 'flex' : 'none'};gap:6px;flex-wrap:wrap;margin-bottom:10px;padding:10px;background:var(--bg-card-light);border-radius:10px;border:1px solid var(--border);max-height:140px;overflow-y:auto;align-content:flex-start;">
+          <div id="countryFlagsPanel" style="display:${state.leagueFilter.startsWith('country:') ? 'flex' : 'none'};gap:5px;flex-wrap:wrap;margin-bottom:10px;padding:8px;background:rgba(0,0,0,0.15);border-radius:10px;border:1px solid var(--border);">
             ${filterBtns.filter(f => f.key.startsWith('country:')).map(f => `
               <button onclick="setLeagueFilter('${f.key.replace(/'/g, "\\'")}')" title="${f.title || ''}" style="
                 width:32px;height:32px;border-radius:50%;font-size:0.9rem;cursor:pointer;display:flex;align-items:center;justify-content:center;
@@ -11906,28 +11732,21 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             </div>
           ` : `
             <!-- LISTA CAMPIONATI -->
-            <div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+            <div style="display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch;">
               ${filtered.map(l => {
                 const isFav = state.favoriteLeagues.includes(l.id);
-                const isTop5 = ['Italy','England','Spain','Germany','France'].includes(l.country);
                 return `
-                <div class="v9-league-row ${isFav ? 'fav' : ''}" onclick="selectLeague(${l.id})">
-                  <button class="v9-league-fav-btn ${isFav ? '' : 'off'}" onclick="event.stopPropagation();toggleFavoriteLeague(${l.id})" title="${isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}">
+                <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:${isFav ? 'rgba(251,191,36,0.06)' : 'var(--bg-card)'};border:1px solid ${isFav ? 'rgba(251,191,36,0.2)' : 'var(--border)'};border-radius:10px;cursor:pointer;transition:all 0.15s;" onclick="selectLeague(${l.id})">
+                  <button onclick="event.stopPropagation();toggleFavoriteLeague(${l.id})" style="background:none;border:none;cursor:pointer;font-size:1.2rem;padding:4px;flex-shrink:0;opacity:${isFav ? '1' : '0.35'};" title="${isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}">
                     ${isFav ? '⭐' : '☆'}
                   </button>
-                  ${l.logo ? '<img src="' + l.logo + '" style="width:28px;height:28px;border-radius:6px;flex-shrink:0;background:var(--bg-input);padding:2px;" onerror="this.style.display=\'none\'">' : '<div style="width:28px;height:28px;border-radius:50%;background:var(--bg-input);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;">' + (COUNTRY_FLAGS[l.country] || '🏳️') + '</div>'}
+                  ${l.logo ? '<img src="' + l.logo + '" style="width:28px;height:28px;border-radius:4px;flex-shrink:0;" onerror="this.style.display=\'none\'">' : ''}
                   <div style="flex:1;min-width:0;">
-                    <div style="display:flex;align-items:center;gap:6px;">
-                      <span class="v9-league-name">${esc(l.name)}</span>
-                      ${isTop5 ? '<span style="font-size:8px;font-weight:700;padding:2px 6px;border-radius:4px;background:rgba(245,158,11,0.12);color:var(--accent-gold);letter-spacing:0.05em;">★ TOP 5</span>' : ''}
-                    </div>
-                    <div class="v9-league-meta">${esc(l.country)}</div>
+                    <div style="font-size:0.95rem;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(l.name)}</div>
+                    <div style="font-size:0.75rem;color:var(--text-dark);">${esc(l.country)}</div>
                   </div>
-                  <div style="text-align:right;flex-shrink:0;">
-                    <div class="v9-league-count">${l.matchCount}</div>
-                    <div class="v9-league-count-label">PARTITE</div>
-                  </div>
-                  <span class="v9-league-arrow">›</span>
+                  <div style="font-size:0.85rem;font-weight:800;color:var(--accent-cyan);flex-shrink:0;">${l.matchCount}</div>
+                  <span style="font-size:0.7rem;color:var(--text-dark);flex-shrink:0;">▶</span>
                 </div>`;
               }).join('')}
             </div>
@@ -11937,27 +11756,27 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         <!-- COLPO DEL GIORNO -->
         ${renderColpoDelGiorno(picks)}
 
-        <!-- STATS BAR V9 -->
-        <div class="v9-stats-grid" style="margin-bottom:16px;border-top:none;padding-top:0;">
-          <div class="v9-stat-card">
-            <div class="v9-stat-num">${state.matches.length}</div>
-            <div class="v9-stat-label">Partite</div>
+        <!-- STATS BAR -->
+        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
+            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-cyan);">${state.matches.length}</div>
+            <div style="font-size:0.65rem;color:var(--text-dark);">Partite</div>
           </div>
-          <div class="v9-stat-card">
-            <div class="v9-stat-num">${state.leagues.length}</div>
-            <div class="v9-stat-label">Campionati</div>
+          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
+            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-green);">${state.leagues.length}</div>
+            <div style="font-size:0.65rem;color:var(--text-dark);">Campionati</div>
           </div>
-          <div class="v9-stat-card highlight-gold">
-            <div class="v9-stat-num">${picks.matchAdvices.filter(a => a.confidence === 'high').length}</div>
-            <div class="v9-stat-label">★ Massima</div>
+          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
+            <div style="font-size:1.4rem;font-weight:800;color:var(--accent-gold);">${picks.matchAdvices.filter(a => a.confidence === 'high').length}</div>
+            <div style="font-size:0.65rem;color:var(--text-dark);">Alta Conf.</div>
           </div>
-          <div class="v9-stat-card highlight">
-            <div class="v9-stat-num">${picks.matchAdvices.filter(a => a.dataQuality === 'high').length}</div>
-            <div class="v9-stat-label">📊 HD</div>
+          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
+            <div style="font-size:1.4rem;font-weight:800;color:#10b981;">${picks.matchAdvices.filter(a => a.dataQuality === 'high').length}</div>
+            <div style="font-size:0.65rem;color:var(--text-dark);">📊 HD</div>
           </div>
-          <div class="v9-stat-card">
-            <div class="v9-stat-num">${picks.matchAdvices.length}</div>
-            <div class="v9-stat-label">Analizzate</div>
+          <div style="flex:1;min-width:80px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center;">
+            <div style="font-size:1.4rem;font-weight:800;color:#a78bfa;">${picks.matchAdvices.length}</div>
+            <div style="font-size:0.65rem;color:var(--text-dark);">Analizzate</div>
           </div>
         </div>
         
@@ -11989,63 +11808,60 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         if (d < 1440) return Math.floor(d/60) + 'h fa';
         return Math.floor(d/1440) + 'g fa';
       };
-      const wrColor = wr >= 60 ? 'var(--accent-emerald)' : (wr >= 45 ? 'var(--accent-yellow)' : 'var(--accent-red)');
       return `
-        <div class="v9-schedina-overlay" onclick="state.schedinaModal=false;render();">
-          <div class="v9-schedina-modal" onclick="event.stopPropagation()">
-            <div class="v9-schedina-head">
-              <div class="v9-schedina-title">
-                &#x1F3AB; <span>La Mia Schedina</span>
-                <span class="v9-schedina-counter">${myBets.length}</span>
-              </div>
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9000;display:flex;align-items:flex-start;justify-content:center;padding:20px;"
+             onclick="state.schedinaModal=false;render();">
+          <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:500px;max-height:85vh;overflow-y:auto;margin-top:60px;"
+               onclick="event.stopPropagation()">
+            <div style="padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+              <div style="font-size:1.05rem;font-weight:800;color:var(--accent-gold);">&#x1F3AB; La Mia Schedina</div>
               <div style="display:flex;align-items:center;gap:10px;">
-                <div class="v9-schedina-stats">
-                  <div class="v9-stat-pill won">
-                    <div class="num">${won}</div>
-                    <div class="lbl">Vinte</div>
+                <div style="display:flex;gap:8px;">
+                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
+                    <div style="font-size:1rem;font-weight:800;color:var(--accent-green);">${won}</div>
+                    <div style="font-size:0.6rem;color:var(--text-dark);">Vinte</div>
                   </div>
-                  <div class="v9-stat-pill lost">
-                    <div class="num">${lost}</div>
-                    <div class="lbl">Perse</div>
+                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
+                    <div style="font-size:1rem;font-weight:800;color:var(--accent-red);">${lost}</div>
+                    <div style="font-size:0.6rem;color:var(--text-dark);">Perse</div>
                   </div>
-                  <div class="v9-stat-pill pending">
-                    <div class="num">${pending}</div>
-                    <div class="lbl">Attesa</div>
+                  <div style="text-align:center;padding:3px 10px;background:var(--bg-input);border-radius:8px;">
+                    <div style="font-size:1rem;font-weight:800;color:var(--accent-yellow);">${pending}</div>
+                    <div style="font-size:0.6rem;color:var(--text-dark);">Attesa</div>
                   </div>
                 </div>
-                <button class="v9-schedina-close" onclick="state.schedinaModal=false;render();">&#x2715;</button>
+                <button onclick="state.schedinaModal=false;render();"
+                  style="background:transparent;border:1px solid var(--border);color:var(--text-gray);border-radius:50%;width:30px;height:30px;font-size:1.1rem;cursor:pointer;">&#x2715;</button>
               </div>
             </div>
             <div style="padding:16px 20px;">
               ${completed > 0 ? `
-                <div class="v9-winrate-strip">
-                  <span class="label">Win Rate</span>
-                  <div class="v9-winrate-bar">
-                    <div class="v9-winrate-fill" style="width:${wr}%;background:${wrColor};"></div>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;background:var(--bg-input);padding:10px 14px;border-radius:10px;">
+                  <span style="font-size:0.8rem;font-weight:700;color:var(--text-gray);">Win Rate</span>
+                  <div style="flex:1;height:8px;background:rgba(255,255,255,0.1);border-radius:4px;overflow:hidden;">
+                    <div style="width:${wr}%;height:100%;border-radius:4px;background:${wr>=60?'var(--accent-green)':wr>=45?'var(--accent-yellow)':'var(--accent-red)'};transition:width 0.5s;"></div>
                   </div>
-                  <span class="v9-winrate-pct" style="color:${wrColor};">${wr.toFixed(0)}%</span>
+                  <span style="font-size:1.1rem;font-weight:800;color:${wr>=60?'var(--accent-green)':wr>=45?'var(--accent-yellow)':'var(--accent-red)'};">${wr.toFixed(0)}%</span>
                 </div>
               ` : ''}
               ${myBets.length === 0 ? `
-                <div class="v9-empty">
-                  <div class="icon">&#x1F4CB;</div>
-                  <div class="msg">Nessun pronostico tracciato</div>
-                  <div class="hint">Clicca su una partita e aggiungi un pick alla schedina.</div>
+                <div style="text-align:center;padding:30px;color:var(--text-gray);">
+                  <div style="font-size:2.5rem;margin-bottom:10px;">&#x1F4CB;</div>
+                  <div>Nessun pronostico tracciato.</div>
+                  <div style="font-size:0.78rem;margin-top:6px;">Clicca su una partita e aggiungi un pick alla schedina.</div>
                 </div>
               ` : `
-                <div class="v9-bet-list">
+                <div style="display:flex;flex-direction:column;gap:5px;">
                   ${sorted.map(b => `
-                    <div class="v9-bet-card ${b.status}">
-                      <div style="min-width:0;">
-                        <div class="v9-bet-match">${esc(b.matchName)}</div>
-                        <div class="v9-bet-info">${timeAgo(b.timestamp)} ${b.result ? '· ' + b.result : '· &#x23F3; In attesa'}</div>
+                    <div class="schedina-item ${b.status}">
+                      <div class="schedina-item-left">
+                        <div class="schedina-item-match">${esc(b.matchName)}</div>
+                        <div class="schedina-item-info">${timeAgo(b.timestamp)} ${b.result ? '&bull; ' + b.result : '&bull; &#x23F3; In attesa'}</div>
                       </div>
-                      <div class="v9-bet-right">
-                        <div style="text-align:right;">
-                          <div class="v9-bet-pick">${esc(b.pick)}</div>
-                          <div class="v9-bet-prob">${b.prob != null && !isNaN(b.prob) ? parseFloat(b.prob).toFixed(0)+'%' : ''}</div>
-                        </div>
-                        <div class="v9-bet-status">${b.status==='won'?'&#x2705;':b.status==='lost'?'&#x274C;':'&#x23F3;'}</div>
+                      <div class="schedina-item-right">
+                        <div class="schedina-item-pick">${esc(b.pick)}</div>
+                        <span style="font-size:0.72rem;font-weight:700;color:var(--accent-cyan)">${b.prob != null && !isNaN(b.prob) ? parseFloat(b.prob).toFixed(0)+'%' : ''}</span>
+                        <div class="schedina-item-status">${b.status==='won'?'&#x2705;':b.status==='lost'?'&#x274C;':'&#x23F3;'}</div>
                       </div>
                     </div>
                   `).join('')}
@@ -12400,71 +12216,35 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         
         ${state.superAnalysis ? safeRender(() => renderSuperAnalysis(state.superAnalysis, m), '', 'SuperAnalysis') : ''}
         
-        <div class="analysis-hero v9-match-hero">
-          <!-- META: lega + data + tier badge -->
-          <div class="v9-match-meta">
-            <div class="v9-match-league">
-              <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent-emerald);"></span>
-              <span>${esc(m.league.country)} · ${esc(m.league.name)}</span>
-              <span style="opacity:0.5;">•</span>
-              <span>${formatDateFull(m.date)} · ${formatTime(m.date)}</span>
+        <div class="analysis-hero">
+          <div class="hero-league">${esc(m.league.country)} • ${esc(m.league.name)} • ${formatDateFull(m.date)} ${formatTime(m.date)}</div>
+          <div class="hero-match">
+            <div class="hero-team">
+              ${m.home.logo ? `<img src="${m.home.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.home.name)}</div>`}
+              <div class="hero-team-name">${esc(m.home.name)}</div>
             </div>
-            ${state.consensus && state.consensus.confidence ? (() => {
-              const tier = state.consensus.confidence.toLowerCase();
-              const icon = tier === 'massima' ? '★' : (tier === 'alta' ? '◆' : (tier === 'media' ? '●' : '○'));
-              return `<div class="v9-match-tier-badge ${tier}">${icon} ${state.consensus.confidence}</div>`;
-            })() : ''}
-          </div>
-          
-          <!-- TEAMS + PREDICTED SCORE -->
-          <div class="v9-match-teams">
-            <div class="v9-match-team">
-              ${m.home.logo ? `<img src="${m.home.logo}" class="v9-match-team-logo" onerror="this.outerHTML='<div class=&quot;v9-match-team-logo&quot;>${getInitials(m.home.name)}</div>'">` : `<div class="v9-match-team-logo">${getInitials(m.home.name)}</div>`}
-              <div class="v9-match-team-name">${esc(m.home.name)}</div>
-              <div class="v9-match-team-form" style="display:flex;justify-content:center;align-items:center;gap:5px;margin-top:6px;">${(d.homeForm || '').slice(0,5).split('').map(r => {
-                const c = r.toUpperCase();
-                if (c !== 'W' && c !== 'L' && c !== 'D') return '';
-                const cfg = c === 'W' ? 'background:#10b981;color:white;'
-                          : c === 'L' ? 'background:rgba(248,113,113,0.85);color:white;'
-                          : 'background:rgba(255,255,255,0.12);color:#94a3b8;border:1px solid rgba(255,255,255,0.08);';
-                return `<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:800;line-height:1;box-shadow:none;${cfg}">${c}</span>`;
-              }).join('')}</div>
+            <div class="hero-prediction">
+              <div class="hero-score-box">${d.exactScores && d.exactScores[0] ? d.exactScores[0].h : '?'}</div>
+              <div class="hero-vs">VS</div>
+              <div class="hero-score-box">${d.exactScores && d.exactScores[0] ? d.exactScores[0].a : '?'}</div>
             </div>
-            <div class="v9-score-prediction">
-              <div class="v9-score-label">Risultato Previsto</div>
-              <div class="v9-score-numbers">${d.exactScores && d.exactScores[0] ? d.exactScores[0].h : '?'}<span class="sep">-</span>${d.exactScores && d.exactScores[0] ? d.exactScores[0].a : '?'}</div>
-              ${d.xG ? `<div class="v9-score-xg">xG ${d.xG.home.toFixed(1)} · ${d.xG.away.toFixed(1)}</div>` : ''}
-            </div>
-            <div class="v9-match-team">
-              ${m.away.logo ? `<img src="${m.away.logo}" class="v9-match-team-logo" onerror="this.outerHTML='<div class=&quot;v9-match-team-logo&quot;>${getInitials(m.away.name)}</div>'">` : `<div class="v9-match-team-logo">${getInitials(m.away.name)}</div>`}
-              <div class="v9-match-team-name">${esc(m.away.name)}</div>
-              <div class="v9-match-team-form" style="display:flex;justify-content:center;align-items:center;gap:5px;margin-top:6px;">${(d.awayForm || '').slice(0,5).split('').map(r => {
-                const c = r.toUpperCase();
-                if (c !== 'W' && c !== 'L' && c !== 'D') return '';
-                const cfg = c === 'W' ? 'background:#10b981;color:white;'
-                          : c === 'L' ? 'background:rgba(248,113,113,0.85);color:white;'
-                          : 'background:rgba(255,255,255,0.12);color:#94a3b8;border:1px solid rgba(255,255,255,0.08);';
-                return `<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:800;line-height:1;box-shadow:none;${cfg}">${c}</span>`;
-              }).join('')}</div>
+            <div class="hero-team">
+              ${m.away.logo ? `<img src="${m.away.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.away.name)}</div>`}
+              <div class="hero-team-name">${esc(m.away.name)}</div>
             </div>
           </div>
           
-          <!-- MULTIGOL TRIO V9: Casa · ⭐Best · Ospite -->
-          <div class="v9-mg-trio">
-            <div class="v9-mg-card">
-              <div class="v9-mg-label">&#x1F3E0; MG ${esc(m.home.name.split(' ')[0])}</div>
-              <div class="v9-mg-value">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
-              <div class="v9-mg-prob">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
+          <!-- MG CASA / MG OSPITE sotto risultato esatto previsto -->
+          <div class="hero-mg-section">
+            <div class="hero-mg-box">
+              <div class="hero-mg-label">&#x1F3E0; MG ${m.home.name.split(' ')[0]}</div>
+              <div class="hero-mg-value">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
+              <div class="hero-mg-prob">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
             </div>
-            <div class="v9-mg-card best">
-              <div class="v9-mg-label">⭐ Best Multigol</div>
-              <div class="v9-mg-value">${d.multigoal && d.multigoal[0] ? d.multigoal[0].range : 'N/A'}</div>
-              <div class="v9-mg-prob">${d.multigoal && d.multigoal[0] ? d.multigoal[0].prob.toFixed(0) + '%' : '—'}${d.multigoal && d.multigoal[0] ? '<span class="quote-tag">@' + d.multigoal[0].quota + '</span>' : ''}</div>
-            </div>
-            <div class="v9-mg-card">
-              <div class="v9-mg-label">✈️ MG ${esc(m.away.name.split(' ')[0])}</div>
-              <div class="v9-mg-value">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
-              <div class="v9-mg-prob">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
+            <div class="hero-mg-box">
+              <div class="hero-mg-label">✈️ MG ${m.away.name.split(' ')[0]}</div>
+              <div class="hero-mg-value">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
+              <div class="hero-mg-prob">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
             </div>
           </div>
           
@@ -12633,17 +12413,17 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
       
-      <!-- BETTINGPRO BASE -->
+      <!-- PRESAGIO -->
       <div class="section-accordion">
         <div class="section-accordion-header open" onclick="toggleAccordion(this)">
-          <div class="section-accordion-title"><span>🤖</span> BettingPro Base</div>
+          <div class="section-accordion-title"><span>◇</span> Presagio</div>
           <div style="display:flex;align-items:center;gap:10px;">
-            <span style="font-size:0.6rem;background:rgba(168,85,247,0.12);color:#c084fc;padding:2px 8px;border-radius:8px;font-weight:700;">vs Oracle</span>
+            <span style="font-size:0.6rem;background:linear-gradient(135deg,rgba(108,99,255,0.18),rgba(0,212,255,0.18));color:#a78bfa;padding:2px 8px;border-radius:8px;font-weight:700;letter-spacing:1px;">PRE-ANALISI</span>
             <span class="section-accordion-arrow">▼</span>
           </div>
         </div>
         <div class="section-accordion-body open">
-          ${safeRender(() => renderBettingProBase(m, d), '', 'BettingProBase')}
+          ${safeRender(() => window.Presagio.render(m, d), '', 'Presagio')}
         </div>
       </div>
       
@@ -14188,8 +13968,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
     // === INIT ===
     async function init() {
-      console.log('%c🚀 BettingPro v9.0', 'font-size:14px;font-weight:bold;color:#10b981;', '— Restyling Premium · 4 famiglie Consensus + Drop Detector adattivo + Best Multigol');
-      console.log('%c  Sistemi attivi:', 'color:#888;', '🎯 xG | 💰 Market | 📊 Meta | 📉 Drops');
+      console.log('&#x1F680; BettingPro v7 + Odds Lab + Value Engine + Consensus starting...');
 
       // === PULIZIA localStorage ALL'AVVIO ===
       // Svuota bp2_prediction_history se supera 1MB (previene QuotaExceededError)
