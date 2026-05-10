@@ -54,41 +54,24 @@
   }
 
   // MOT — Motivazione (0-100)
-  // Curva continua a U asimmetrica + boost contestuale dalla forma:
-  //  • picco max al vertice della classifica (~88)
-  //  • minimo a meta' classifica (~38)
-  //  • risalita verso ~85 in zona retrocessione
-  //  • bonus crisi: squadre mid-table o pre-retrocessione in cattiva
-  //    forma prendono un boost (panico salvezza)
-  //  • bonus titolo: top con grande forma cavalcano l'onda
-  //  • +5 vantaggio casa
-  function calcMOT(position, totalTeams, isHome, formValue) {
+  // Funzione a gradini sulla posizione + bonus casa.
+  function calcMOT(position, totalTeams, isHome) {
     const totalT = (totalTeams && totalTeams >= 10) ? totalTeams : 20;
-    if (!position || position <= 0) return isHome ? 55 : 50;
-
-    const ratio = position / totalT;
-    let mot;
-
-    if      (ratio <= 0.05) mot = 88;                                              // 1° posto (lotta titolo pura)
-    else if (ratio <= 0.20) mot = 88 - ((ratio - 0.05) / 0.15) * 23;               // top 2-4: 88 → 65
-    else if (ratio <= 0.50) mot = 65 - ((ratio - 0.20) / 0.30) * 27;               // upper-mid: 65 → 38
-    else if (ratio <= 0.75) mot = 38 + ((ratio - 0.50) / 0.25) * 20;               // lower-mid: 38 → 58
-    else if (ratio <= 0.95) mot = 58 + ((ratio - 0.75) / 0.20) * 22;               // pre-retro: 58 → 80
-    else                    mot = 80 + ((ratio - 0.95) / 0.05) * 8;                // ultimissime: 80 → 88
-
-    // Boost contestuale dalla forma recente (se disponibile)
-    if (typeof formValue === 'number') {
-      if (ratio >= 0.40 && ratio <= 0.70 && formValue < 35) {
-        mot += 10;  // mid-table in crisi → panico salvezza precoce
-      } else if (ratio > 0.60 && ratio < 0.85 && formValue < 30) {
-        mot += 7;   // pre-retrocessione + forma orribile → panico massimo
-      } else if (ratio < 0.30 && formValue > 70) {
-        mot += 5;   // top in grande forma → cavalca l'onda
-      }
+    if (!position || position <= 0) {
+      return isHome ? 55 : 50;
     }
+    const ratio = position / totalT;
+
+    let mot;
+    if (ratio <= 0.15)      mot = 82;   // lotta titolo (top ~3)
+    else if (ratio >= 0.85) mot = 78;   // lotta salvezza (ultime ~3)
+    else if (ratio <= 0.30) mot = 65;   // zona Champions
+    else if (ratio <= 0.50) mot = 52;   // zona Europa
+    else if (ratio >= 0.70) mot = 60;   // sopra retrocessione
+    else                    mot = 42;   // meta' classifica
 
     if (isHome) mot += 5;
-    return Math.round(clamp(0, mot, 100));
+    return round(clamp(0, mot, 100));
   }
 
   // FOR — Forbice/Forma (0-100)
