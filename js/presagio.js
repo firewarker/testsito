@@ -193,10 +193,15 @@
         top3: [{ score: '1-1', prob: 12 }]
       };
     }
-    const top3 = exactScores.slice(0, 3).map(s => ({
-      score: s.score || `${safe(s.home, 1)}-${safe(s.away, 1)}`,
-      prob:  safe(s.prob, 0)
-    }));
+    // calcExactScores in app.js produce oggetti con campi { h, a, p, prob }.
+    // Manteniamo fallback verso { home, away, score } per robustezza futura.
+    const top3 = exactScores.slice(0, 3).map(s => {
+      const h = (s.h ?? s.home);
+      const a = (s.a ?? s.away);
+      const score = s.score || (h != null && a != null ? h + '-' + a : '?-?');
+      const prob = safe(s.prob ?? s.p, 0);
+      return { score, prob };
+    });
     return { best: top3[0], top3 };
   }
 
