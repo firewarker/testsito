@@ -4302,6 +4302,37 @@
   color: transparent;
   line-height: 1;
 }
+
+/* MG Casa / MG Ospite sotto il totale */
+.psg-team-mg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 3px 8px;
+  background: rgba(108,99,255,0.10);
+  border: 1px solid rgba(108,99,255,0.25);
+  border-radius: 999px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.psg-mg-tag {
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--psg-violet);
+  letter-spacing: 1px;
+}
+.psg-mg-range {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--psg-text);
+}
+.psg-mg-prob {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--psg-cyan);
+}
+
 .psg-vs {
   font-size: 10px;
   font-weight: 700;
@@ -4581,27 +4612,51 @@
   color: var(--psg-text-dim);
   margin-top: 7px;
 }
+.psg-exact-sub {
+  font-size: 8.5px;
+  font-weight: 700;
+  color: var(--psg-text-dim);
+  letter-spacing: 2px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--psg-border);
+  text-transform: uppercase;
+}
 .psg-exact-top3 {
   display: flex;
   justify-content: space-around;
-  margin-top: 12px;
-  padding-top: 11px;
-  border-top: 1px solid var(--psg-border);
+  margin-top: 10px;
   gap: 8px;
 }
 .psg-exact-top3-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   flex: 1;
   font-size: 9px;
   color: var(--psg-text-dim);
 }
+.psg-exact-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: rgba(108,99,255,0.18);
+  border: 1px solid rgba(108,99,255,0.35);
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--psg-violet);
+  letter-spacing: 0.5px;
+}
 .psg-exact-top3-item b {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--psg-text);
+  margin-top: 2px;
 }
 
 /* ===== MOBILE TWEAKS ===== */

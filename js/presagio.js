@@ -54,24 +54,41 @@
   }
 
   // MOT — Motivazione (0-100)
-  // Funzione a gradini sulla posizione + bonus casa.
-  function calcMOT(position, totalTeams, isHome) {
+  // Curva continua a U asimmetrica + boost contestuale dalla forma:
+  //  • picco max al vertice della classifica (~88)
+  //  • minimo a meta' classifica (~38)
+  //  • risalita verso ~85 in zona retrocessione
+  //  • bonus crisi: squadre mid-table o pre-retrocessione in cattiva
+  //    forma prendono un boost (panico salvezza)
+  //  • bonus titolo: top con grande forma cavalcano l'onda
+  //  • +5 vantaggio casa
+  function calcMOT(position, totalTeams, isHome, formValue) {
     const totalT = (totalTeams && totalTeams >= 10) ? totalTeams : 20;
-    if (!position || position <= 0) {
-      return isHome ? 55 : 50;
-    }
-    const ratio = position / totalT;
+    if (!position || position <= 0) return isHome ? 55 : 50;
 
+    const ratio = position / totalT;
     let mot;
-    if (ratio <= 0.15)      mot = 82;   // lotta titolo (top ~3)
-    else if (ratio >= 0.85) mot = 78;   // lotta salvezza (ultime ~3)
-    else if (ratio <= 0.30) mot = 65;   // zona Champions
-    else if (ratio <= 0.50) mot = 52;   // zona Europa
-    else if (ratio >= 0.70) mot = 60;   // sopra retrocessione
-    else                    mot = 42;   // meta' classifica
+
+    if      (ratio <= 0.05) mot = 88;                                              // 1° posto (lotta titolo pura)
+    else if (ratio <= 0.20) mot = 88 - ((ratio - 0.05) / 0.15) * 23;               // top 2-4: 88 → 65
+    else if (ratio <= 0.50) mot = 65 - ((ratio - 0.20) / 0.30) * 27;               // upper-mid: 65 → 38
+    else if (ratio <= 0.75) mot = 38 + ((ratio - 0.50) / 0.25) * 20;               // lower-mid: 38 → 58
+    else if (ratio <= 0.95) mot = 58 + ((ratio - 0.75) / 0.20) * 22;               // pre-retro: 58 → 80
+    else                    mot = 80 + ((ratio - 0.95) / 0.05) * 8;                // ultimissime: 80 → 88
+
+    // Boost contestuale dalla forma recente (se disponibile)
+    if (typeof formValue === 'number') {
+      if (ratio >= 0.40 && ratio <= 0.70 && formValue < 35) {
+        mot += 10;  // mid-table in crisi → panico salvezza precoce
+      } else if (ratio > 0.60 && ratio < 0.85 && formValue < 30) {
+        mot += 7;   // pre-retrocessione + forma orribile → panico massimo
+      } else if (ratio < 0.30 && formValue > 70) {
+        mot += 5;   // top in grande forma → cavalca l'onda
+      }
+    }
 
     if (isHome) mot += 5;
-    return round(clamp(0, mot, 100));
+    return Math.round(clamp(0, mot, 100));
   }
 
   // FOR — Forbice/Forma (0-100)
@@ -189,20 +206,77 @@
   function pickExactScore(exactScores) {
     if (!Array.isArray(exactScores) || exactScores.length === 0) {
       return {
-        best: { score: '1-1', prob: 12 },
-        top3: [{ score: '1-1', prob: 12 }]
+        best: { score: '1-1', prob: 12, outcome: 'X' },
+        top3: [{ score: '1-1', prob: 12, outcome: 'X' }]
       };
     }
     // calcExactScores in app.js produce oggetti con campi { h, a, p, prob }.
-    // Manteniamo fallback verso { home, away, score } per robustezza futura.
-    const top3 = exactScores.slice(0, 3).map(s => {
+    // Manteniamo fallback verso { home, away, score } per robustezza.
+    function norm(s) {
       const h = (s.h ?? s.home);
       const a = (s.a ?? s.away);
-      const score = s.score || (h != null && a != null ? h + '-' + a : '?-?');
-      const prob = safe(s.prob ?? s.p, 0);
-      return { score, prob };
-    });
-    return { best: top3[0], top3 };
+      const score = s.score || ((h != null && a != null) ? (h + '-' + a) : '?-?');
+      const prob  = safe(s.prob ?? s.p, 0);
+      const outcome = (h != null && a != null)
+        ? (h > a ? '1' : (h < a ? '2' : 'X'))
+        : null;
+      return { h, a, score, prob, outcome };
+    }
+
+    // Best assoluto (il piu' probabile globalmente)
+    const best = norm(exactScores[0]);
+
+    // Per ciascun esito 1/X/2 cerca il punteggio piu' probabile.
+    // Cosi' la fascia "top 3" mostra scenari DIVERSI invece di tre punteggi
+    // quasi identici (es. 0-1, 0-2, 0-0 → diventa 1-0, 1-1, 0-1).
+    const byOutcome = { '1': null, 'X': null, '2': null };
+    for (const raw of exactScores) {
+      const s = norm(raw);
+      if (s.outcome && byOutcome[s.outcome] == null) {
+        byOutcome[s.outcome] = s;
+      }
+      if (byOutcome['1'] && byOutcome['X'] && byOutcome['2']) break;
+    }
+
+    const candidates = ['1', 'X', '2']
+      .map(o => byOutcome[o])
+      .filter(s => s != null);
+
+    // Se manca qualche esito (es. tutti i top sono X), riempi con i top globali
+    const used = new Set(candidates.map(c => c.score));
+    for (const raw of exactScores) {
+      if (candidates.length >= 3) break;
+      const s = norm(raw);
+      if (!used.has(s.score)) {
+        candidates.push(s);
+        used.add(s.score);
+      }
+    }
+
+    // Top3 ordinato per probabilità decrescente
+    candidates.sort((a, b) => b.prob - a.prob);
+    const top3 = candidates.slice(0, 3).map(s => ({
+      score: s.score, prob: s.prob, outcome: s.outcome || '?'
+    }));
+
+    return {
+      best: { score: best.score, prob: best.prob, outcome: best.outcome || '?' },
+      top3
+    };
+  }
+
+  // Multigol singola squadra: trova il range con probabilità massima
+  // tra quelli prodotti da app.js (analysis.multigoalHome/Away)
+  function pickBestMG(multigoalArr) {
+    if (!Array.isArray(multigoalArr) || multigoalArr.length === 0) return null;
+    let best = null;
+    for (const m of multigoalArr) {
+      const prob = safe(m.prob, 0);
+      if (!best || prob > best.prob) {
+        best = { range: m.range || '?', prob };
+      }
+    }
+    return best;
   }
 
   // ------------------------------------------------------------
@@ -218,7 +292,9 @@
 
     try {
       const {
-        xG, p1X2, pOU, pBTTS, exactScores, multigoal, temporalDistribution,
+        xG, p1X2, pOU, pBTTS, exactScores, multigoal,
+        multigoalHome, multigoalAway,
+        temporalDistribution,
         homeData, awayData, homePosition, awayPosition, miniStandings,
         homeForm, awayForm
       } = analysis;
@@ -230,10 +306,10 @@
 
       const ircHome = calcIRC(homeData);
       const ircAway = calcIRC(awayData);
-      const motHome = calcMOT(homePosition, totalTeams, true);
-      const motAway = calcMOT(awayPosition, totalTeams, false);
       const forHome = calcFOR(homeForm);
       const forAway = calcFOR(awayForm);
+      const motHome = calcMOT(homePosition, totalTeams, true,  forHome);
+      const motAway = calcMOT(awayPosition, totalTeams, false, forAway);
 
       const totalHome = ircHome + motHome + forHome;   // 0-300
       const totalAway = ircAway + motAway + forAway;
@@ -252,6 +328,10 @@
 
       const exact = pickExactScore(exactScores);
 
+      // MG Casa / MG Ospite: range piu' probabile per ciascuna squadra
+      const mgHome = pickBestMG(multigoalHome);
+      const mgAway = pickBestMG(multigoalAway);
+
       const result = {
         metrics: {
           home: { irc: ircHome, mot: motHome, for: forHome, total: totalHome },
@@ -261,6 +341,10 @@
         },
         predictions,
         exactResult: exact,
+        mg: {
+          home: mgHome,    // {range, prob} o null se dato mancante
+          away: mgAway
+        },
         meta: {
           calculatedAt: Date.now(),
           dataQuality: analysis.quality || 'base'
@@ -318,12 +402,26 @@
     html +=     (homeLogo ? '<img class="psg-team-logo" src="' + homeLogo + '" alt="" onerror="this.style.display=\'none\'">' : '<div class="psg-team-logo-fallback">' + homeName.substring(0,2).toUpperCase() + '</div>');
     html +=     '<div class="psg-team-name">' + homeName + '</div>';
     html +=     '<div class="psg-team-total">' + p.metrics.home.total + '</div>';
+    if (p.mg && p.mg.home) {
+      html +=   '<div class="psg-team-mg">';
+      html +=     '<span class="psg-mg-tag">MG</span>';
+      html +=     '<span class="psg-mg-range">' + escHTML(p.mg.home.range) + '</span>';
+      html +=     '<span class="psg-mg-prob">' + p.mg.home.prob.toFixed(0) + '%</span>';
+      html +=   '</div>';
+    }
     html +=   '</div>';
     html +=   '<div class="psg-vs">VS</div>';
     html +=   '<div class="psg-team">';
     html +=     (awayLogo ? '<img class="psg-team-logo" src="' + awayLogo + '" alt="" onerror="this.style.display=\'none\'">' : '<div class="psg-team-logo-fallback">' + awayName.substring(0,2).toUpperCase() + '</div>');
     html +=     '<div class="psg-team-name">' + awayName + '</div>';
     html +=     '<div class="psg-team-total">' + p.metrics.away.total + '</div>';
+    if (p.mg && p.mg.away) {
+      html +=   '<div class="psg-team-mg">';
+      html +=     '<span class="psg-mg-tag">MG</span>';
+      html +=     '<span class="psg-mg-range">' + escHTML(p.mg.away.range) + '</span>';
+      html +=     '<span class="psg-mg-prob">' + p.mg.away.prob.toFixed(0) + '%</span>';
+      html +=   '</div>';
+    }
     html +=   '</div>';
     html += '</div>';
 
@@ -402,14 +500,16 @@
     h += renderPredBox('MULTIGOL',        preds.multigol);
     h += '</div>';
 
-    // Risultato esatto + top 3
+    // Risultato esatto + top 3 con etichette esito
     h += '<div class="psg-exact">';
     h +=   '<div class="psg-exact-label">RISULTATO ESATTO PIÙ PROBABILE</div>';
     h +=   '<div class="psg-exact-score">' + escHTML(ex.best.score) + '</div>';
     h +=   '<div class="psg-exact-prob">probabilità Poisson ' + ex.best.prob.toFixed(1) + '%</div>';
+    h +=   '<div class="psg-exact-sub">scenario per ciascun esito</div>';
     h +=   '<div class="psg-exact-top3">';
     ex.top3.forEach(s => {
       h += '<div class="psg-exact-top3-item">' +
+             '<div class="psg-exact-tag">' + escHTML(s.outcome || '?') + '</div>' +
              '<b>' + escHTML(s.score) + '</b>' +
              '<span>' + s.prob.toFixed(1) + '%</span>' +
            '</div>';

@@ -12224,9 +12224,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               <div class="hero-team-name">${esc(m.home.name)}</div>
             </div>
             <div class="hero-prediction">
-              <div class="hero-score-box">${d.exactScores && d.exactScores[0] ? d.exactScores[0].h : '?'}</div>
               <div class="hero-vs">VS</div>
-              <div class="hero-score-box">${d.exactScores && d.exactScores[0] ? d.exactScores[0].a : '?'}</div>
             </div>
             <div class="hero-team">
               ${m.away.logo ? `<img src="${m.away.logo}" class="hero-team-logo" onerror="this.style.display='none'">` : `<div class="hero-team-logo-fallback">${getInitials(m.away.name)}</div>`}
