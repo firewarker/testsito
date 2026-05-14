@@ -64,20 +64,32 @@
   //  • +5 vantaggio casa
   function calcMOT(position, totalTeams, isHome, formValue) {
     const totalT = (totalTeams && totalTeams >= 10) ? totalTeams : 20;
-    if (!position || position <= 0) return isHome ? 55 : 50;
 
-    const ratio = position / totalT;
+    // VALIDAZIONE ROBUSTA: position puo' arrivare come stringa non numerica
+    // ("—", "?", "N/A") da campionati senza classifica disponibile.
+    // Number() converte numeri-stringa ("5"→5) e produce NaN per il resto;
+    // isFinite filtra NaN, Infinity, e valori non validi.
+    const pos = Number(position);
+    if (!isFinite(pos) || pos <= 0) {
+      return isHome ? 55 : 50;
+    }
+
+    const ratio = pos / totalT;
+    if (!isFinite(ratio)) {
+      return isHome ? 55 : 50;
+    }
+
     let mot;
-
     if      (ratio <= 0.05) mot = 88;                                              // 1° posto (lotta titolo pura)
     else if (ratio <= 0.20) mot = 88 - ((ratio - 0.05) / 0.15) * 23;               // top 2-4: 88 → 65
     else if (ratio <= 0.50) mot = 65 - ((ratio - 0.20) / 0.30) * 27;               // upper-mid: 65 → 38
     else if (ratio <= 0.75) mot = 38 + ((ratio - 0.50) / 0.25) * 20;               // lower-mid: 38 → 58
     else if (ratio <= 0.95) mot = 58 + ((ratio - 0.75) / 0.20) * 22;               // pre-retro: 58 → 80
-    else                    mot = 80 + ((ratio - 0.95) / 0.05) * 8;                // ultimissime: 80 → 88
+    else if (ratio <= 1.50) mot = 80 + ((ratio - 0.95) / 0.05) * 8;                // ultimissime: 80 → 88
+    else                    mot = 88;                                              // dato anomalo (ratio > 1.5)
 
-    // Boost contestuale dalla forma recente (se disponibile)
-    if (typeof formValue === 'number') {
+    // Boost contestuale dalla forma recente (se valore valido)
+    if (typeof formValue === 'number' && !isNaN(formValue)) {
       if (ratio >= 0.40 && ratio <= 0.70 && formValue < 35) {
         mot += 10;  // mid-table in crisi → panico salvezza precoce
       } else if (ratio > 0.60 && ratio < 0.85 && formValue < 30) {
@@ -88,7 +100,10 @@
     }
 
     if (isHome) mot += 5;
-    return Math.round(clamp(0, mot, 100));
+
+    // SAFETY NET FINALE: se per qualche motivo siamo finiti in NaN, fallback
+    const final = Math.round(clamp(0, mot, 100));
+    return isNaN(final) ? (isHome ? 55 : 50) : final;
   }
 
   // FOR — Forbice/Forma (0-100)
