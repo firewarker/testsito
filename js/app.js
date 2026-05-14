@@ -1,5 +1,18 @@
 // ===================================================
-    // BETTINGPRO v7 - CON ML AVANZATO, ODDS LAB, VALUE ENGINE, CONSENSUS
+    // BETTINGPRO v10 - CONSIGLIO AI ARMONIZZATO
+    // ===================================================
+    // V10 PATCH (rispetto a V9.1):
+    //   • generateAIAdvice ora dialoga con TUTTI i moduli:
+    //       - Reverse Quote Protocol (OU/BTTS + 1X2)
+    //       - Trap Detector (13 fattori situazionali)
+    //       - Presagio (5 metriche di pre-analisi)
+    //       - Super AI / Oracle (analisi news)
+    //     Risultato: confidence calibrata, probabilita' fusa col mercato,
+    //     consensus negativo declassa, consensus positivo conferma.
+    //   • Tracking quote REALI dei bookmaker invece di sintetiche (100/prob).
+    //     I bet legacy vengono marcati con flag syntheticOdds=true.
+    //   • getRealROIStats() / getSyntheticROIStats() esposti su window
+    //     per misurare ROI vero vs ROI storico inflato dalle quote sintetiche.
     // ===================================================
     
     // ============================================
@@ -725,6 +738,9 @@
       liveCountdown: 60,
       // Tracking Pronostici
       trackedBets: [],
+      // PATCH V10: Registro quote REALI viste dai bookmaker (matchId -> oddsObj)
+      // Usato da trackBet per salvare quote vere invece di quelle sintetiche (100/prob)
+      lastKnownOdds: {},
       // Machine Learning Stats - NUOVO
       mlStats: JSON.parse(localStorage.getItem('bp2_ml_stats') || '{}'),
       // Machine Learning Thresholds - AMPLIATO con più mercati
@@ -3572,7 +3588,15 @@
         }
         if (!state.oddsCache) state.oddsCache = new Map();
         state.oddsCache.set(cacheKey, oddsResult);
-        if (oddsResult) console.log('✅ Quote bookmaker:', oddsResult.bookmakerName, oddsResult);
+        if (oddsResult) {
+          console.log('✅ Quote bookmaker:', oddsResult.bookmakerName, oddsResult);
+          // PATCH V10: registra le quote 1X2 reali nel registro globale
+          recordRealOdds(fixtureId, {
+            homeOdd: oddsResult.homeOdd,
+            drawOdd: oddsResult.drawOdd,
+            awayOdd: oddsResult.awayOdd
+          });
+        }
         return oddsResult;
       } catch(e) {
         Logger.log('getBookmakerOdds', e, 'warn');
@@ -4208,6 +4232,8 @@ async function analyzeMatch(match) {
           try {
             const oddsLab = await fetchOddsLab(match.id);
             state.oddsLab = oddsLab;
+            // PATCH V10: registra le quote OU/BTTS reali dall'oddsLab
+            if (oddsLab) captureOddsFromLab(match.id, oddsLab);
             if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
@@ -4374,6 +4400,8 @@ async function analyzeMatch(match) {
           console.log('🔬 v7: Fetching Odds Lab...');
           const oddsLab = await fetchOddsLab(match.id);
           state.oddsLab = oddsLab;
+          // PATCH V10: registra quote OU/BTTS reali per il tracking
+          if (oddsLab) captureOddsFromLab(match.id, oddsLab);
           
           // Value Bets (richiede oddsLab)
           if (oddsLab) {
@@ -5410,7 +5438,333 @@ async function analyzeMatch(match) {
           });
       }
 
+      // ════════════════════════════════════════════════════════════════════
+      // PATCH V10: MARKET REALITY CHECK
+      // Il Consiglio AI ora dialoga con TUTTI i moduli laterali:
+      //   • Reverse Quote Protocol (mercato sharp)
+      //   • Trap Detector (rischi situazionali)
+      //   • Presagio (pre-analisi 5 metriche)
+      //   • Super AI (oracle con news)
+      // Risultato: confidence calibrata, prob fusa con il mercato,
+      // reasons trasparenti, alternative consigliate quando il pick e' debole.
+      // ════════════════════════════════════════════════════════════════════
+      try { applyMarketRealityCheck(advice, analysis, match); }
+      catch(e) { console.warn('MarketRealityCheck error:', e); }
+
       return advice;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // PATCH V10: HELPER PER LA FUSIONE SEGNALI
+    // ════════════════════════════════════════════════════════════════════
+
+    // Estrae le probabilita' implicite del mercato sharp/medio per il
+    // mercato corrispondente al pick del Consiglio AI.
+    function getReverseQuoteForPick(analysis, pickName) {
+      const oddsLab = state.oddsLab;
+      if (!oddsLab || !oddsLab.bookmakers || oddsLab.bookmakers.length === 0) return null;
+
+      let avgOver=0, avgUnder=0, ouCount=0;
+      let avgGG=0, avgNG=0, ggCount=0;
+      let sharpOver=null, sharpUnder=null, sharpGG=null, sharpNG=null;
+
+      oddsLab.bookmakers.forEach(function(bk) {
+        if (bk.ou25 && bk.ou25.over > 1 && bk.ou25.under > 1) {
+          avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++;
+          if (bk.isSharp && sharpOver == null) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; }
+        }
+        if (bk.btts && bk.btts.yes > 1 && bk.btts.no > 1) {
+          avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++;
+          if (bk.isSharp && sharpGG == null) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; }
+        }
+      });
+      if (ouCount > 0) { avgOver /= ouCount; avgUnder /= ouCount; }
+      if (ggCount > 0) { avgGG /= ggCount; avgNG /= ggCount; }
+
+      // Preferisci sharp (Pinnacle/Bet365/Unibet) se disponibile
+      const ou1 = sharpOver || avgOver;
+      const ou2 = sharpUnder || avgUnder;
+      const gg1 = sharpGG || avgGG;
+      const gg2 = sharpNG || avgNG;
+
+      function implied(o1, o2) {
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) return null;
+        const tot = 1/o1 + 1/o2;
+        return { p1: (1/o1/tot)*100, p2: (1/o2/tot)*100 };
+      }
+
+      const pOU = analysis.pOU || {};
+      const pBTTS = analysis.pBTTS || 50;
+      let modelProb, bookProb, market, oppositePick;
+
+      if (/Over 2\.5/i.test(pickName)) {
+        const impl = implied(ou1, ou2); if (!impl) return null;
+        modelProb = (pOU[2.5] && pOU[2.5].over) || 50;
+        bookProb = impl.p1; market = 'Over 2.5'; oppositePick = 'Under 2.5';
+      } else if (/Under 2\.5/i.test(pickName)) {
+        const impl = implied(ou1, ou2); if (!impl) return null;
+        modelProb = (pOU[2.5] && pOU[2.5].under) || 50;
+        bookProb = impl.p2; market = 'Under 2.5'; oppositePick = 'Over 2.5';
+      } else if (/^GG/i.test(pickName)) {
+        const impl = implied(gg1, gg2); if (!impl) return null;
+        modelProb = pBTTS; bookProb = impl.p1; market = 'GG'; oppositePick = 'NG';
+      } else if (/^NG/i.test(pickName)) {
+        const impl = implied(gg1, gg2); if (!impl) return null;
+        modelProb = 100 - pBTTS; bookProb = impl.p2; market = 'NG'; oppositePick = 'GG';
+      } else {
+        return null; // 1X2/1X/X2/X gestiti dal Trap Detector
+      }
+
+      const delta = modelProb - bookProb;
+      return { delta, modelProb, bookProb, market, oppositePick };
+    }
+
+    // Confronta il pick 1X2 col mercato (state.bookmakerOdds) per gli stessi
+    // motivi di overconfidence (modello vs mercato sui mercati 1X2).
+    function getReverseQuote1X2(analysis, pickName) {
+      const bk = state.bookmakerOdds;
+      if (!bk || !bk.homeOdd || !bk.drawOdd || !bk.awayOdd) return null;
+      const p1X2 = analysis.p1X2 || {};
+
+      function impliedFrom1X2(oH, oD, oA) {
+        const rH = 1/oH, rD = 1/oD, rA = 1/oA;
+        const tot = rH + rD + rA;
+        return { home: (rH/tot)*100, draw: (rD/tot)*100, away: (rA/tot)*100 };
+      }
+      const book = impliedFrom1X2(bk.homeOdd, bk.drawOdd, bk.awayOdd);
+
+      let modelProb, bookProb, market;
+      if (/^1 \(|^1$/i.test(pickName))      { modelProb = p1X2.home || 33; bookProb = book.home; market = '1'; }
+      else if (/^2 \(|^2$/i.test(pickName)) { modelProb = p1X2.away || 33; bookProb = book.away; market = '2'; }
+      else if (/^X \(|^X$/i.test(pickName)) { modelProb = p1X2.draw || 33; bookProb = book.draw; market = 'X'; }
+      else if (/^1X/i.test(pickName))       { modelProb = (p1X2.home || 33) + (p1X2.draw || 33); bookProb = book.home + book.draw; market = '1X'; }
+      else if (/^X2/i.test(pickName))       { modelProb = (p1X2.away || 33) + (p1X2.draw || 33); bookProb = book.away + book.draw; market = 'X2'; }
+      else return null;
+
+      return { delta: modelProb - bookProb, modelProb, bookProb, market };
+    }
+
+    // Cerca un eventuale consenso/conflitto tra Presagio e l'AI Advice.
+    // Se Presagio (con metriche IRC/MOT/FOR/Tendenza) propone una direzione
+    // opposta, e' un segnale di debolezza interna.
+    function getPresagioAlignment(advice, analysis, match) {
+      try {
+        if (!window.Presagio || typeof window.Presagio.calculate !== 'function') return null;
+        const psg = window.Presagio.calculate(analysis, match);
+        if (!psg || !psg.predictions) return null;
+
+        // Mappa: per il mercato che l'AI Advice ha scelto, cosa dice Presagio?
+        const aiPick = advice.pick || '';
+        let psgPick = null, psgProb = null, market = null;
+
+        if (/Over 2\.5/i.test(aiPick) || /Under 2\.5/i.test(aiPick)) {
+          psgPick = psg.predictions.overUnder?.value || null;
+          psgProb = psg.predictions.overUnder?.prob || null;
+          market = 'OU2.5';
+        } else if (/^GG/i.test(aiPick) || /^NG/i.test(aiPick)) {
+          psgPick = psg.predictions.ggng?.value || null;
+          psgProb = psg.predictions.ggng?.prob || null;
+          market = 'GG/NG';
+        } else if (/^1 \(|^2 \(|^X \(|^1$|^2$|^X$/.test(aiPick)) {
+          psgPick = psg.predictions.segnoSecco?.value || null;
+          psgProb = psg.predictions.segnoSecco?.prob || null;
+          market = '1X2';
+        } else if (/^1X|^X2|^12/i.test(aiPick)) {
+          psgPick = psg.predictions.doppiaChance?.value || null;
+          psgProb = psg.predictions.doppiaChance?.prob || null;
+          market = 'DC';
+        } else {
+          return null;
+        }
+
+        if (!psgPick) return null;
+        // Match diretto sul valore (es. "Under 2.5" === "Under 2.5", "1" === "1")
+        const aiNormalized = aiPick.replace(/\s*\(.*?\)\s*/g, '').trim();
+        const aligned = aiNormalized.toLowerCase() === String(psgPick).toLowerCase()
+                    || aiPick.toLowerCase().indexOf(String(psgPick).toLowerCase()) === 0;
+        return { aligned, psgPick, psgProb, market };
+      } catch(e) {
+        console.warn('Presagio alignment failed:', e);
+        return null;
+      }
+    }
+
+    // Funzione principale: applica le verifiche di realta' al consiglio
+    // e degrada/riallinea quando ci sono divergenze significative.
+    function applyMarketRealityCheck(advice, analysis, match) {
+      if (!advice || !advice.pick) return;
+
+      let conflictPoints = 0;  // accumulatore: piu' alto = piu' conflitti
+
+      // ─── 1) REVERSE QUOTE OU/BTTS ────────────────────────────────────
+      const rqOU = getReverseQuoteForPick(analysis, advice.pick);
+      if (rqOU) {
+        advice._reverseQuote = rqOU;
+        const absDelta = Math.abs(rqOU.delta);
+        // Blend probabilita': 60% modello / 40% bookie sharp
+        const blendedProb = advice.prob * 0.6 + rqOU.bookProb * 0.4;
+
+        if (absDelta > 15) {
+          conflictPoints += 2;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          else if (advice.confidence === 'medium') advice.confidence = 'low';
+          advice.prob = blendedProb;
+          advice.reasons.push({
+            text: `⚠️ Reverse Quote: forte disaccordo col mercato su ${rqOU.market}. Modello ${rqOU.modelProb.toFixed(0)}% vs bookie sharp ${rqOU.bookProb.toFixed(0)}% (Δ ${rqOU.delta.toFixed(1)}%). Confidence declassata, probabilita' fusa col mercato.`,
+            type: 'negative'
+          });
+          if (rqOU.delta < -15) {
+            advice.alternatives.unshift({
+              pick: rqOU.oppositePick + ' (sharp money)',
+              prob: (100 - rqOU.bookProb).toFixed(0)
+            });
+          }
+        } else if (absDelta > 8) {
+          conflictPoints += 1;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          advice.prob = blendedProb;
+          advice.reasons.push({
+            text: `🟡 Reverse Quote: lieve disaccordo (${rqOU.modelProb.toFixed(0)}% vs ${rqOU.bookProb.toFixed(0)}%).`,
+            type: 'neutral'
+          });
+        } else {
+          // Allineato: aggiungi conferma positiva
+          advice.reasons.push({
+            text: `🟢 Reverse Quote: allineato col mercato (${rqOU.modelProb.toFixed(0)}% vs ${rqOU.bookProb.toFixed(0)}%).`,
+            type: 'positive'
+          });
+        }
+      }
+
+      // ─── 2) REVERSE QUOTE 1X2 ────────────────────────────────────────
+      const rq1X2 = getReverseQuote1X2(analysis, advice.pick);
+      if (rq1X2) {
+        advice._reverseQuote1X2 = rq1X2;
+        const absDelta = Math.abs(rq1X2.delta);
+        const blendedProb = advice.prob * 0.6 + rq1X2.bookProb * 0.4;
+
+        if (absDelta > 15) {
+          conflictPoints += 2;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          else if (advice.confidence === 'medium') advice.confidence = 'low';
+          advice.prob = blendedProb;
+          advice.reasons.push({
+            text: `⚠️ Reverse Quote 1X2: bookmaker prezza ${rq1X2.market} al ${rq1X2.bookProb.toFixed(0)}% vs modello ${rq1X2.modelProb.toFixed(0)}% (Δ ${rq1X2.delta.toFixed(1)}%).`,
+            type: 'negative'
+          });
+        } else if (absDelta > 8) {
+          conflictPoints += 1;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          advice.prob = blendedProb;
+        }
+      }
+
+      // ─── 3) TRAP DETECTOR ────────────────────────────────────────────
+      try {
+        if (typeof calculateTrapScore === 'function') {
+          const trap = calculateTrapScore(match, analysis, advice);
+          if (trap && typeof trap.score === 'number') {
+            advice._trap = { score: trap.score, level: trap.level };
+            const isMarketPick = /Over|Under|^GG|^NG/i.test(advice.pick);
+            const threshold = isMarketPick ? 65 : 50;
+
+            if (trap.score >= threshold + 10) {
+              conflictPoints += 2;
+              if (advice.confidence === 'high') advice.confidence = 'medium';
+              else if (advice.confidence === 'medium') advice.confidence = 'low';
+              advice.prob = Math.max(40, advice.prob * 0.85);
+              const topFactors = (trap.traps || [])
+                .filter(t => t.weight > 0)
+                .slice(0, 2)
+                .map(t => t.factor)
+                .join(', ');
+              advice.reasons.push({
+                text: `🪤 Trap Detector: ${trap.label} (${trap.score}/100). ${topFactors || 'rischi situazionali rilevati'}.`,
+                type: 'negative'
+              });
+              if (!isMarketPick && trap.trapPick && trap.trapPick.pick) {
+                advice.alternatives.unshift({
+                  pick: trap.trapPick.pick + ' (anti-trap)',
+                  prob: trap.trapPick.prob ? Number(trap.trapPick.prob).toFixed(0) : '—'
+                });
+              }
+            } else if (trap.score >= threshold) {
+              conflictPoints += 1;
+              if (advice.confidence === 'high') advice.confidence = 'medium';
+              advice.reasons.push({
+                text: `🟠 Trap Detector: ATTENZIONE (${trap.score}/100).`,
+                type: 'neutral'
+              });
+            } else if (trap.score <= 20 && !isMarketPick) {
+              advice.reasons.push({
+                text: `🟢 Trap Detector: partita SICURA (${trap.score}/100).`,
+                type: 'positive'
+              });
+            }
+          }
+        }
+      } catch(e) { console.warn('Trap check failed:', e); }
+
+      // ─── 4) PRESAGIO ALIGNMENT ──────────────────────────────────────
+      const psg = getPresagioAlignment(advice, analysis, match);
+      if (psg) {
+        advice._presagio = psg;
+        if (!psg.aligned && psg.psgProb >= 55) {
+          conflictPoints += 1;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          advice.reasons.push({
+            text: `🟡 Presagio (${psg.market}) suggerisce "${psg.psgPick}" (${psg.psgProb.toFixed(0)}%) — non allineato col Consiglio AI.`,
+            type: 'neutral'
+          });
+        } else if (psg.aligned) {
+          advice.reasons.push({
+            text: `🟢 Presagio conferma: ${psg.psgPick} (${psg.psgProb.toFixed(0)}%).`,
+            type: 'positive'
+          });
+        }
+      }
+
+      // ─── 5) SUPER AI / ORACLE ───────────────────────────────────────
+      const superAI = state.superAIAnalysis;
+      if (superAI && !superAI.error) {
+        advice._oracle = { recommendation: superAI.recommendation, confidence: superAI.confidence };
+        if (superAI.recommendation === 'SKIP') {
+          conflictPoints += 2;
+          if (advice.confidence === 'high') advice.confidence = 'medium';
+          else if (advice.confidence === 'medium') advice.confidence = 'low';
+          advice.reasons.push({
+            text: `🛑 Oracle AI consiglia SKIP su questa partita (analisi news).`,
+            type: 'negative'
+          });
+        } else if (superAI.algoConfirmed && superAI.confidence >= 75) {
+          advice.reasons.push({
+            text: `🧠 Oracle AI conferma con ${superAI.confidence}% di confidenza.`,
+            type: 'positive'
+          });
+        }
+      }
+
+      // ─── 6) SINTESI FINALE ──────────────────────────────────────────
+      // Se ci sono 3+ punti di conflitto, declassa indipendentemente
+      // dai singoli moduli (consensus negativo)
+      if (conflictPoints >= 3 && advice.confidence !== 'low') {
+        advice.confidence = 'low';
+        advice.reasons.unshift({
+          text: `⛔ Consensus negativo: ${conflictPoints} moduli segnalano debolezza su questo pick. Considera di evitare.`,
+          type: 'negative'
+        });
+      } else if (conflictPoints === 0 && advice.confidence === 'medium' && advice.prob >= 70) {
+        // Tutti i moduli concordano e modello forte → upgrade
+        advice.confidence = 'high';
+        advice.reasons.push({
+          text: `✅ Consensus positivo: tutti i moduli concordano su questo pick.`,
+          type: 'positive'
+        });
+      }
+
+      // Clamp probabilita' (puo' essere uscita fuori range da blending)
+      advice.prob = Math.max(1, Math.min(99, advice.prob));
+      advice._conflictPoints = conflictPoints;
     }
 
     // === SUPER ALGORITHM ===
@@ -8949,8 +9303,112 @@ async function analyzeMatch(match) {
     }
     
     // === TRACKING PRONOSTICI ===
-    
-    function trackBet(type, matchId, matchName, pick, prob, odds, isLive = false) {
+
+    // ════════════════════════════════════════════════════════════════════
+    // PATCH V10 - REGISTRO QUOTE REALI
+    // Salva e recupera le quote bookmaker VERE per il tracking dei bet
+    // ════════════════════════════════════════════════════════════════════
+
+    // Registra le quote reali viste per un matchId. Chiamata ogni volta
+    // che arrivano dati freschi da getBookmakerOdds o fetchOddsLab.
+    function recordRealOdds(matchId, data) {
+      if (!matchId || !data) return;
+      if (!state.lastKnownOdds) state.lastKnownOdds = {};
+      const existing = state.lastKnownOdds[matchId] || {};
+      const merged = Object.assign({}, existing, data, { ts: Date.now() });
+      state.lastKnownOdds[matchId] = merged;
+    }
+
+    // Estrae quote 1X2 + OU 2.5 + GG/NG dall'oggetto state.oddsLab di un match
+    // e le memorizza in lastKnownOdds[matchId]
+    function captureOddsFromLab(matchId, oddsLab) {
+      if (!matchId || !oddsLab || !Array.isArray(oddsLab.bookmakers) || !oddsLab.bookmakers.length) return;
+      let avgOver=0, avgUnder=0, ouCount=0;
+      let avgGG=0, avgNG=0, ggCount=0;
+      let sharpOver=null, sharpUnder=null, sharpGG=null, sharpNG=null;
+      oddsLab.bookmakers.forEach(function(bk) {
+        if (bk.ou25 && bk.ou25.over > 1 && bk.ou25.under > 1) {
+          avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++;
+          if (bk.isSharp && sharpOver == null) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; }
+        }
+        if (bk.btts && bk.btts.yes > 1 && bk.btts.no > 1) {
+          avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++;
+          if (bk.isSharp && sharpGG == null) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; }
+        }
+      });
+      const payload = {};
+      if (ouCount > 0) {
+        payload.over25Odd = sharpOver || (avgOver / ouCount);
+        payload.under25Odd = sharpUnder || (avgUnder / ouCount);
+      }
+      if (ggCount > 0) {
+        payload.ggOdd = sharpGG || (avgGG / ggCount);
+        payload.ngOdd = sharpNG || (avgNG / ggCount);
+      }
+      if (Object.keys(payload).length > 0) recordRealOdds(matchId, payload);
+    }
+
+    // Mappa un nome pick alla quota reale corrispondente, leggendo
+    // lastKnownOdds. Restituisce { odds, source } oppure null se la quota
+    // reale non e' disponibile.
+    function resolveRealOddsForPick(matchId, pickName) {
+      if (!state.lastKnownOdds || !state.lastKnownOdds[matchId]) return null;
+      const o = state.lastKnownOdds[matchId];
+      const p = String(pickName || '').toLowerCase();
+
+      // 1X2 singoli
+      if (/^1\s*\(|^1 \(vittoria casa\)|^1$/i.test(pickName)) {
+        return o.homeOdd ? { odds: parseFloat(o.homeOdd), source: '1X2' } : null;
+      }
+      if (/^x \(pareggio\)|^x$/i.test(pickName)) {
+        return o.drawOdd ? { odds: parseFloat(o.drawOdd), source: '1X2' } : null;
+      }
+      if (/^2 \(vittoria ospite\)|^2$/i.test(pickName)) {
+        return o.awayOdd ? { odds: parseFloat(o.awayOdd), source: '1X2' } : null;
+      }
+      // Doppia chance: combinazione 1/X o X/2 o 1/2 (formula bookie: 1/(1/oA + 1/oB))
+      if (p.indexOf('1x') === 0) {
+        if (o.homeOdd && o.drawOdd) {
+          const comb = 1 / (1/o.homeOdd + 1/o.drawOdd);
+          // Aggiungi margine bookie standard ~5%
+          return { odds: parseFloat((comb * 0.97).toFixed(2)), source: '1X2_combined' };
+        }
+        return null;
+      }
+      if (p.indexOf('x2') === 0) {
+        if (o.awayOdd && o.drawOdd) {
+          const comb = 1 / (1/o.awayOdd + 1/o.drawOdd);
+          return { odds: parseFloat((comb * 0.97).toFixed(2)), source: '1X2_combined' };
+        }
+        return null;
+      }
+      if (p.indexOf('12') === 0) {
+        if (o.homeOdd && o.awayOdd) {
+          const comb = 1 / (1/o.homeOdd + 1/o.awayOdd);
+          return { odds: parseFloat((comb * 0.97).toFixed(2)), source: '1X2_combined' };
+        }
+        return null;
+      }
+      // Over/Under 2.5
+      if (/over 2\.5/i.test(pickName)) {
+        return o.over25Odd ? { odds: parseFloat(o.over25Odd), source: 'OU25' } : null;
+      }
+      if (/under 2\.5/i.test(pickName)) {
+        return o.under25Odd ? { odds: parseFloat(o.under25Odd), source: 'OU25' } : null;
+      }
+      // GG/NG
+      if (/^gg/i.test(pickName)) {
+        return o.ggOdd ? { odds: parseFloat(o.ggOdd), source: 'BTTS' } : null;
+      }
+      if (/^ng/i.test(pickName)) {
+        return o.ngOdd ? { odds: parseFloat(o.ngOdd), source: 'BTTS' } : null;
+      }
+      // Altri mercati (Over 1.5, Over 3.5, Multigol, ecc.): quote reali non
+      // attualmente raccolte in oddsLab → ritorna null e si fa fallback sintetico
+      return null;
+    }
+
+    function trackBet(type, matchId, matchName, pick, prob, odds, isLive = false, syntheticOdds = false) {
       // Normalizza il pick per evitare duplicati con formati diversi
       const normalizedPick = pick.trim();
       
@@ -8981,6 +9439,9 @@ async function analyzeMatch(match) {
         pick: normalizedPick, // Usa il pick normalizzato
         prob: parseFloat(prob),
         odds: parseFloat(odds) || 0,
+        // PATCH V10: flag che indica se la quota e' sintetica (100/prob) o reale.
+        // I bet con syntheticOdds=true NON vanno usati per calcolo ROI reale.
+        syntheticOdds: !!syntheticOdds,
         isLive,
         timestamp: new Date().toISOString(),
         status: 'pending', // pending, won, lost
@@ -9004,11 +9465,15 @@ async function analyzeMatch(match) {
       
       // Guard: se prob non è valida, fallback a 50% per evitare odds=Infinity
       const safeProb = (typeof prob === 'number' && prob > 0 && isFinite(prob)) ? prob : 50;
-      const odds = (100 / safeProb).toFixed(2);
+      // PATCH V10: prova a recuperare la quota REALE dal registro; se non c'e' usa sintetica
+      const realOdds = resolveRealOddsForPick(matchId, pick);
+      const odds = realOdds ? realOdds.odds.toFixed(2) : (100 / safeProb).toFixed(2);
+      const isSynthetic = !realOdds;
       
-      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false);
+      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false, isSynthetic);
       if (bet) {
-        alert(`✅ Pronostico tracciato!\n\n${matchName}\n${pick} @ ${odds}\n\nVerrà verificato automaticamente a fine partita.`);
+        const oddsLabel = isSynthetic ? `${odds} (sintetica)` : `${odds} (${realOdds.source})`;
+        alert(`✅ Pronostico tracciato!\n\n${matchName}\n${pick} @ ${oddsLabel}\n\nVerrà verificato automaticamente a fine partita.`);
       } else {
         alert('⚠️ Questo pronostico è già stato tracciato.');
       }
@@ -9017,7 +9482,8 @@ async function analyzeMatch(match) {
     // Funzione per tracciare pronostici LIVE
     function trackLiveBet(matchId, matchName, pick, prob, odds, event) {
       if (event) event.stopPropagation();
-      const bet = trackBet('live', matchId, matchName, pick, prob, odds, true);
+      // LIVE riceve la quota dal chiamante (gia' reale)
+      const bet = trackBet('live', matchId, matchName, pick, prob, odds, true, false);
       if (bet) {
         alert(`✅ Pronostico LIVE tracciato!\n\n${matchName}\n${pick} @ ${odds}\n\nVerrà verificato automaticamente a fine partita.`);
       } else {
@@ -9029,8 +9495,11 @@ async function analyzeMatch(match) {
     function trackFromHome(matchId, matchName, pick, prob, event) {
       if (event) event.stopPropagation();
       const safeProb = (typeof prob === 'number' && prob > 0 && isFinite(prob)) ? prob : 50;
-      const odds = (100 / safeProb).toFixed(2);
-      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false);
+      // PATCH V10: prova a recuperare la quota REALE dal registro
+      const realOdds = resolveRealOddsForPick(matchId, pick);
+      const odds = realOdds ? realOdds.odds.toFixed(2) : (100 / safeProb).toFixed(2);
+      const isSynthetic = !realOdds;
+      const bet = trackBet('prematch', matchId, matchName, pick, safeProb, odds, false, isSynthetic);
       if (bet) {
         render();
       } else {
@@ -9084,6 +9553,89 @@ async function analyzeMatch(match) {
       } catch (e) {
         console.warn('Tracking load error:', e);
       }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // PATCH V10: MIGRAZIONE STORICO E CALCOLO ROI REALE
+    // ════════════════════════════════════════════════════════════════════
+
+    // I bet creati prima della patch V10 hanno quote sintetiche (calcolate
+    // come 100/prob, NON quote reali del bookmaker). Marca retroattivamente
+    // questi bet con syntheticOdds=true cosi' possono essere esclusi dal
+    // calcolo ROI reale.
+    function migrateLegacyOddsFlag() {
+      if (!Array.isArray(state.trackedBets)) return;
+      let migrated = 0;
+      state.trackedBets.forEach(function(b) {
+        if (b.syntheticOdds === undefined) {
+          // I bet pre-patch erano TUTTI con quote sintetiche
+          // tranne i LIVE (che ricevevano la quota dal chiamante).
+          // Approssimazione: se odds === (100/prob arrotondato a 2 decimali),
+          // e' sintetica. Altrimenti potrebbe essere reale (LIVE).
+          if (b.isLive) {
+            b.syntheticOdds = false;
+          } else {
+            const expectedSynthetic = +(100 / (b.prob || 1)).toFixed(2);
+            const actualOdds = +b.odds;
+            b.syntheticOdds = Math.abs(expectedSynthetic - actualOdds) < 0.02;
+          }
+          migrated++;
+        }
+      });
+      if (migrated > 0) {
+        console.log('🔄 V10 Migration: ' + migrated + ' bet marcati con syntheticOdds flag');
+        saveTrackedBets();
+      }
+    }
+
+    // Calcola il ROI REALE (escludendo bet con odds sintetiche).
+    // Restituisce null se non ci sono bet validi.
+    function getRealROIStats() {
+      if (!Array.isArray(state.trackedBets)) return null;
+      const real = state.trackedBets.filter(function(b) {
+        return !b.syntheticOdds && (b.status === 'won' || b.status === 'lost');
+      });
+      if (real.length === 0) return null;
+      const won = real.filter(function(b) { return b.status === 'won'; });
+      const stake = real.length;
+      const ret = won.reduce(function(s, b) { return s + (parseFloat(b.odds) || 0); }, 0);
+      return {
+        n: real.length,
+        nWon: won.length,
+        nLost: real.length - won.length,
+        winRate: (won.length / real.length) * 100,
+        roi: stake > 0 ? ((ret - stake) / stake) * 100 : 0,
+        profit: ret - stake,
+        avgOdds: real.reduce(function(s, b) { return s + (parseFloat(b.odds) || 0); }, 0) / real.length
+      };
+    }
+
+    // Calcola il ROI SINTETICO (storico) per confronto: usa solo i bet
+    // legacy marcati come syntheticOdds=true
+    function getSyntheticROIStats() {
+      if (!Array.isArray(state.trackedBets)) return null;
+      const syn = state.trackedBets.filter(function(b) {
+        return b.syntheticOdds === true && (b.status === 'won' || b.status === 'lost');
+      });
+      if (syn.length === 0) return null;
+      const won = syn.filter(function(b) { return b.status === 'won'; });
+      const stake = syn.length;
+      const ret = won.reduce(function(s, b) { return s + (parseFloat(b.odds) || 0); }, 0);
+      return {
+        n: syn.length,
+        nWon: won.length,
+        nLost: syn.length - won.length,
+        winRate: (won.length / syn.length) * 100,
+        roi: stake > 0 ? ((ret - stake) / stake) * 100 : 0,
+        profit: ret - stake,
+        warning: 'ROI calcolato su quote sintetiche (100/probabilita\'). NON rappresenta il ROI reale di mercato.'
+      };
+    }
+
+    // Esponi globalmente per debug/console
+    if (typeof window !== 'undefined') {
+      window.getRealROIStats = getRealROIStats;
+      window.getSyntheticROIStats = getSyntheticROIStats;
     }
     
     async function loadMLThresholdsFromCloud() {
@@ -14010,6 +14562,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         loadPerformanceHistoryFromCloud()
       ]).then(() => {
         console.log('✅ Dati utente caricati da cloud');
+        // PATCH V10: Migra i bet legacy aggiungendo il flag syntheticOdds
+        try { migrateLegacyOddsFlag(); } catch(e) { console.warn('V10 migration failed:', e); }
         // Aggiorna ML stats con i dati tracciati
         if (state.trackedBets.length >= 5) {
           updateMLFromResults();
