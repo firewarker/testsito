@@ -1,35 +1,38 @@
 // ===================================================
-    // BETTINGPRO v11.2 - FIX MATEMATICO + LABELING ONESTO
+    // BETTINGPRO v11.3 - MATRICE DI COMPATIBILITÀ MERCATI
     // ===================================================
-    // V11.2 PATCH (rispetto a V11.1):
-    //   FIX MATEMATICI (cose che davano numeri sistematicamente errati):
-    //   • quickCalc1X2: ora applica Dixon-Coles tau (era Poisson puro).
-    //     Coerenza con calcExactScores. Correzione 3-5% sulle prob di X
-    //     in partite low-xG, dove prima il sistema si contraddiceva.
-    //   • quickCalcOver: stesso fix, con normalizzazione corretta su somma totale.
-    //   • calcMultigol: stesso fix Dixon-Coles + normalizzazione.
-    //   • quickCalcBTTS: rimossa la divisione per 1.06/0.95 che neutralizzava
-    //     artificialmente il home advantage. Il home advantage e' parte della
-    //     realta' della partita, non un artefatto. Toglierlo produceva
-    //     BTTS sistematicamente sottostimati su tutte le partite.
-    //   • pBTTS clamp esteso da [15,85] a [5,95]: partite estreme (top vs
-    //     last) potevano avere veri BTTS fuori da [15,85] ma erano tagliati.
+    // V11.3 PATCH (rispetto a V11.2):
+    //   FIX LOGICI (i moduli che prima dicevano il falso):
+    //   • getPresagioBonus_v11 RISCRITTA: ora copre tutte le linee Over/Under
+    //     (1.5, 2.5, 3.5), Multigol, GG/NG, 1X2 e Doppia Chance.
+    //     Prima la regex catturava solo "over 2.5 | under 2.5" e ignorava
+    //     le altre linee → Presagio risultava "0% neutro" anche quando in
+    //     realta' diceva esattamente la stessa cosa del pick.
+    //   • Logica di INCLUSIONE/COMPATIBILITÀ tra mercati:
+    //     - "Under 2.5" e "Under 3.5" non sono in conflitto. Under 2.5 ⊂
+    //       Under 3.5 (se vince il primo vince anche il secondo). Il modulo
+    //       che dice "Under 3.5" ora SUPPORTA un pick "Under 2.5", non lo
+    //       contraddice.
+    //     - Stesso per Over (Over 2.5 ⊂ Over 1.5).
+    //     - "Over X" + "Under Y" sono COMPATIBILI quando Y > X (es. Over 1.5
+    //       + Under 3.5: gol={2,3} → entrambi possono vincere). Sono in
+    //       CONFLITTO solo quando Y <= X (es. Over 2.5 + Under 2.5).
+    //   • getRevQuoteBonus_v11 estesa con la stessa matrice OU. Funziona
+    //     solo per linea 2.5 e GG/NG perche' i bookie sharp non quotano
+    //     affidabilmente le altre linee.
+    //   • Bug parsing 1X2/Doppia Chance corretto: ora distingue "1 (Casa)"
+    //     da "1X (Casa o Pari)" correttamente.
     //
-    //   FIX UX (cose che dicevano il falso all'utente):
-    //   • "Coro dei Moduli": labeling ora distingue 5 stati invece di 3.
-    //     - ARMONIA ALTA (>=6 a favore, <=1 contro)
-    //     - PROPENSIONE+ (4-5 a favore, <=2 contro)
-    //     - CONFLITTO (>=3 a favore E >=3 contro: mercato spaccato)
-    //     - DUBBI (>=3 contro, supporting <= contradicting)
-    //     - NEUTRO (>=5 moduli non si esprimono)
-    //     - INCERTO (caso residuo)
-    //     Risolve il bug "1/9 DISACCORDO" mostrato anche quando in realta'
-    //     7 moduli su 9 erano neutri (non sapevano), non contrari.
-    //   • Breakdown 3-way nel modal: "X a favore / Y neutri / Z contro"
-    //     visibile sempre, non solo se conflitto.
-    //   • Coerenza Verdetto Oracle AI vs Top Pick: se l'Oracle suggerisce
-    //     un mercato e il ranking Score Composito ne classifica un altro
-    //     al #1, ora compare un warning esplicito che spiega perche'.
+    //   FIX UI:
+    //   • Rimosso bottone duplicato "Vedi tutti i 10 pronostici" dall'Hero
+    //     Verdetto. Era doppione del bottone "Giudizio Finale" nell'header
+    //     della pagina partita.
+    //
+    //   Helper aggiunti (riusabili anche in V12+):
+    //   • parseOULine(s) → {direction, line}
+    //   • ouRelation(a, b) → match/support-strong/support-weak/compatible/conflict
+    //   • parseMultigolRange(s) → {min, max}
+    //   • multigolRelation(a, b) → match/subset/superset/overlap/disjoint
     // ===================================================
     
     // ============================================
@@ -14222,10 +14225,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
                 '<span style="font-size:0.7rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
               '</div>'
             ) : '') +
-            // CTA button
-            '<button onclick="openGiudizioFinale(' + m.id + ')" style="margin-top:14px;width:100%;background:linear-gradient(135deg,rgba(0,212,255,0.12),rgba(168,85,247,0.12));border:1px solid rgba(0,212,255,0.3);color:#00d4ff;padding:10px;border-radius:10px;cursor:pointer;font-weight:700;font-size:0.78rem;letter-spacing:0.5px;display:flex;align-items:center;justify-content:center;gap:8px;position:relative;z-index:1;">' +
-              '<span>\u{1F50D}</span> Vedi tutti i 10 pronostici e il dettaglio del coro <span>\u2192</span>' +
-            '</button>' +
+            // PATCH V11.3: rimosso bottone CTA "Vedi tutti i 10 pronostici" — era
+            // duplicato del bottone "Giudizio Finale" nell'header della partita.
           '</div>';
       } catch(e) {
         console.warn('renderHeroVerdetto error:', e);
@@ -14345,14 +14346,85 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       const gapMagnitude_v11 = Math.abs(gapValue_v11);
       const gapFavorsHome_v11 = gapValue_v11 > 0;
 
+      // ════════════════════════════════════════════════════════════════════
+      // PATCH V11.3: MATRICE DI COMPATIBILITÀ TRA MERCATI
+      // Risolve il bug per cui "Presagio Under 3.5" veniva considerato in
+      // disaccordo con "pick Under 2.5", quando in realta' Under 2.5 ⊂ Under 3.5
+      // (se vince Under 2.5, automaticamente vince anche Under 3.5).
+      // ════════════════════════════════════════════════════════════════════
+
+      // Parse di una linea Over/Under da stringa tipo "Over 1.5", "Under 2.5", ecc.
+      function parseOULine(pickStr) {
+        const m = String(pickStr || '').match(/(over|under)\s*(\d+(?:\.\d+)?)/i);
+        if (!m) return null;
+        return { direction: m[1].toLowerCase(), line: parseFloat(m[2]) };
+      }
+
+      // Relazione tra due linee Over/Under (pick vs modulo)
+      // Ritorna: 'match' | 'support-strong' | 'support-weak' | 'compatible' | 'conflict'
+      function ouRelation(pickOU, modOU) {
+        if (!pickOU || !modOU) return null;
+        if (pickOU.direction === modOU.direction) {
+          if (pickOU.line === modOU.line) return 'match';
+          // Stessa direzione, linea diversa = supporto (a forza variabile).
+          // Over: linea piu' alta = piu' restrittiva (3+ gol vs 2+ gol).
+          // Se il modulo e' piu' restrittivo e ne e' confidente, supporta forte il pick.
+          if (pickOU.direction === 'over') {
+            return modOU.line > pickOU.line ? 'support-strong' : 'support-weak';
+          }
+          // Under: linea piu' bassa = piu' restrittiva (0-1 gol vs 0-1-2-3 gol).
+          return modOU.line < pickOU.line ? 'support-strong' : 'support-weak';
+        }
+        // Direzioni opposte: dipende dalle linee.
+        // Over X intersecato con Under Y e' non-vuoto sse X < Y.
+        // Esempi: Over 1.5 ∩ Under 3.5 → gol ∈ {2, 3} → COMPATIBILI.
+        //         Over 2.5 ∩ Under 2.5 → ∅ → CONFLITTO.
+        //         Over 2.5 ∩ Under 3.5 → gol = 3 → COMPATIBILI.
+        let nonEmpty;
+        if (pickOU.direction === 'over') {
+          // Pick Over X, modulo Under Y → non-vuoto sse Y > X.
+          nonEmpty = modOU.line > pickOU.line;
+        } else {
+          // Pick Under X, modulo Over Y → non-vuoto sse Y < X.
+          nonEmpty = modOU.line < pickOU.line;
+        }
+        return nonEmpty ? 'compatible' : 'conflict';
+      }
+
+      // Parse di un range Multigol da stringa tipo "Multigol 2-4", "MG 1-3", "2-4"
+      function parseMultigolRange(pickStr) {
+        const m = String(pickStr || '').match(/(\d+)\s*[-–]\s*(\d+)/);
+        if (!m) return null;
+        return { min: parseInt(m[1], 10), max: parseInt(m[2], 10) };
+      }
+
+      // Relazione tra due range Multigol (pick vs modulo)
+      // Ritorna: 'match' | 'overlap' | 'disjoint' | 'subset' | 'superset'
+      function multigolRelation(pickMG, modMG) {
+        if (!pickMG || !modMG) return null;
+        if (pickMG.min === modMG.min && pickMG.max === modMG.max) return 'match';
+        // Sottoinsieme proprio?
+        if (modMG.min >= pickMG.min && modMG.max <= pickMG.max) return 'subset';   // modulo ⊂ pick
+        if (pickMG.min >= modMG.min && pickMG.max <= modMG.max) return 'superset'; // pick ⊂ modulo
+        // Intersezione non-vuota?
+        const interMin = Math.max(pickMG.min, modMG.min);
+        const interMax = Math.min(pickMG.max, modMG.max);
+        if (interMin <= interMax) return 'overlap';
+        return 'disjoint';
+      }
+
       // Helper: estrae bonus Reverse Quote per il pick specifico
-      // (riusa logica di V10 ma in versione inline per evitare dipendenze)
+      // PATCH V11.3: ora supporta tutte le linee OU (1.5, 2.5, 3.5) via parseOULine.
       function getRevQuoteBonus_v11(pickValue, modelProb) {
         const oddsLab_v11 = state.oddsLab;
         if (!oddsLab_v11 || !oddsLab_v11.bookmakers || oddsLab_v11.bookmakers.length === 0) return 1.0;
         const v = (pickValue || '').toLowerCase();
-        // Solo OU 2.5 e GG/NG sono valutabili (le quote 1X2 le vediamo via gap+bk)
-        if (!/over 2\.5|under 2\.5|^gg|^ng/i.test(v)) return 1.0;
+        const pickOU = parseOULine(v);
+        const isGG = /^gg\b|^ng\b/i.test(v);
+        // Reverse Quote serve solo se abbiamo dati sharp per OU 2.5 o GG/NG.
+        // Per altre linee (Over 1.5, Over 3.5, ecc.) i bookie raramente
+        // pubblicano sharp odds attendibili, quindi restiamo neutri.
+        if (!isGG && !(pickOU && pickOU.line === 2.5)) return 1.0;
         let avgO=0, avgU=0, avgGG=0, avgNG=0, countO=0, countG=0;
         oddsLab_v11.bookmakers.forEach(function(bm) {
           if (bm.ou25 && bm.ou25.over > 1 && bm.ou25.under > 1) { avgO+=bm.ou25.over; avgU+=bm.ou25.under; countO++; }
@@ -14361,9 +14433,9 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         if (countO > 0) { avgO/=countO; avgU/=countO; }
         if (countG > 0) { avgGG/=countG; avgNG/=countG; }
         let bookProb = null;
-        if (/over 2\.5/i.test(v) && countO > 0) {
+        if (pickOU && pickOU.line === 2.5 && pickOU.direction === 'over' && countO > 0) {
           const tot = 1/avgO + 1/avgU; bookProb = (1/avgO/tot) * 100;
-        } else if (/under 2\.5/i.test(v) && countO > 0) {
+        } else if (pickOU && pickOU.line === 2.5 && pickOU.direction === 'under' && countO > 0) {
           const tot = 1/avgO + 1/avgU; bookProb = (1/avgU/tot) * 100;
         } else if (/^gg/i.test(v) && countG > 0) {
           const tot = 1/avgGG + 1/avgNG; bookProb = (1/avgGG/tot) * 100;
@@ -14372,9 +14444,6 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         }
         if (bookProb == null) return 1.0;
         const delta = modelProb - bookProb;
-        // Modello molto piu' bullish del mercato → conferma valore (bonus 1.08)
-        // Modello molto piu' bearish → contraddice mercato (penalty 0.90)
-        // Allineato → neutro
         if (delta > 8) return 1.08;
         if (delta > 3) return 1.03;
         if (delta < -8) return 0.90;
@@ -14382,32 +14451,96 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         return 1.0;
       }
 
-      // Helper: estrae bonus Presagio confrontando il pick con la predizione Presagio sullo stesso mercato
+      // Helper: bonus Presagio, ora con matrice di compatibilita' completa.
+      // PATCH V11.3: copre tutte le linee OU (1.5/2.5/3.5), Multigol con
+      // inclusione/intersezione, GG/NG, 1X2 e Doppia Chance.
       function getPresagioBonus_v11(pickValue) {
         if (!presagioData_v11 || !presagioData_v11.predictions) return { bonus: 1.0, agrees: null };
         const v = (pickValue || '').toLowerCase();
         const preds = presagioData_v11.predictions;
-        let psgPick = null, psgProb = null;
-        if (/over 2\.5|under 2\.5/i.test(v) && preds.overUnder) {
-          psgPick = (preds.overUnder.value || '').toLowerCase();
-          psgProb = preds.overUnder.prob;
-        } else if (/^gg|^ng/i.test(v) && preds.ggng) {
-          psgPick = (preds.ggng.value || '').toLowerCase();
-          psgProb = preds.ggng.prob;
-        } else if (/^1 \(|^2 \(|^x \(|^1$|^x$|^2$/.test(v) && preds.segnoSecco) {
-          psgPick = (preds.segnoSecco.value || '').toLowerCase();
-          psgProb = preds.segnoSecco.prob;
-        } else if (/^1x|^x2|^12/i.test(v) && preds.doppiaChance) {
-          psgPick = (preds.doppiaChance.value || '').toLowerCase();
-          psgProb = preds.doppiaChance.prob;
-        } else {
+
+        // === 1) Mercato Over/Under (qualsiasi linea) ===
+        const pickOU = parseOULine(v);
+        if (pickOU && preds.overUnder && preds.overUnder.value) {
+          const modOU = parseOULine(preds.overUnder.value);
+          const psgProb = preds.overUnder.prob || 0;
+          const rel = ouRelation(pickOU, modOU);
+          if (rel === 'match') {
+            if (psgProb >= 60) return { bonus: 1.10, agrees: true };
+            if (psgProb >= 50) return { bonus: 1.05, agrees: true };
+            return { bonus: 1.02, agrees: true };
+          }
+          if (rel === 'support-strong' && psgProb >= 55) return { bonus: 1.08, agrees: true };
+          if (rel === 'support-weak' && psgProb >= 55) return { bonus: 1.03, agrees: true };
+          if (rel === 'conflict' && psgProb >= 55) return { bonus: 0.90, agrees: false };
+          if (rel === 'conflict' && psgProb >= 45) return { bonus: 0.95, agrees: false };
+          // 'compatible' o low confidence → neutro
           return { bonus: 1.0, agrees: null };
         }
-        if (!psgPick) return { bonus: 1.0, agrees: null };
-        const agrees = v.indexOf(psgPick) >= 0 || psgPick.indexOf(v.replace(/\s*\(.*?\)\s*/g, '').trim()) >= 0;
-        if (agrees && psgProb >= 60) return { bonus: 1.10, agrees: true };
-        if (agrees && psgProb >= 50) return { bonus: 1.05, agrees: true };
-        if (!agrees && psgProb >= 55) return { bonus: 0.92, agrees: false };
+
+        // === 2) Mercato Multigol ===
+        const pickMG = parseMultigolRange(v);
+        const isPickMG = pickMG && /multigol|^mg\b/i.test(v);
+        if (isPickMG && preds.multigol && preds.multigol.value) {
+          const modMG = parseMultigolRange(preds.multigol.value);
+          const psgProb = preds.multigol.prob || 0;
+          const rel = multigolRelation(pickMG, modMG);
+          if (rel === 'match') {
+            if (psgProb >= 55) return { bonus: 1.10, agrees: true };
+            if (psgProb >= 45) return { bonus: 1.05, agrees: true };
+            return { bonus: 1.02, agrees: true };
+          }
+          if (rel === 'subset' && psgProb >= 50) return { bonus: 1.06, agrees: true };
+          if (rel === 'superset' && psgProb >= 50) return { bonus: 1.03, agrees: true };
+          if (rel === 'overlap' && psgProb >= 50) return { bonus: 1.02, agrees: true };
+          if (rel === 'disjoint' && psgProb >= 50) return { bonus: 0.93, agrees: false };
+          return { bonus: 1.0, agrees: null };
+        }
+
+        // === 3) GG/NG ===
+        if (/^gg\b|^ng\b/i.test(v) && preds.ggng) {
+          const psgPick = (preds.ggng.value || '').toLowerCase();
+          const psgProb = preds.ggng.prob || 0;
+          const pickIsGG = /^gg\b/.test(v);
+          const psgIsGG = /gg/.test(psgPick) && !/ng/.test(psgPick);
+          const sameDir = pickIsGG === psgIsGG;
+          if (sameDir && psgProb >= 60) return { bonus: 1.10, agrees: true };
+          if (sameDir && psgProb >= 50) return { bonus: 1.05, agrees: true };
+          if (!sameDir && psgProb >= 55) return { bonus: 0.90, agrees: false };
+          if (!sameDir && psgProb >= 45) return { bonus: 0.95, agrees: false };
+          return { bonus: 1.0, agrees: null };
+        }
+
+        // === 4) Segno secco 1X2 (1, X, 2) ===
+        if (/^[12x]\s*[\(\s]|^[12x]$/.test(v) && preds.segnoSecco && preds.segnoSecco.value) {
+          const pickSign = v.charAt(0); // '1', 'x', '2'
+          const psgSign = String(preds.segnoSecco.value).trim().charAt(0).toLowerCase();
+          const psgProb = preds.segnoSecco.prob || 0;
+          if (pickSign === psgSign) {
+            if (psgProb >= 60) return { bonus: 1.10, agrees: true };
+            if (psgProb >= 45) return { bonus: 1.05, agrees: true };
+            return { bonus: 1.02, agrees: true };
+          }
+          if (psgProb >= 50) return { bonus: 0.92, agrees: false };
+          return { bonus: 1.0, agrees: null };
+        }
+
+        // === 5) Doppia Chance (1X, X2, 12) ===
+        if (/^1x|^x2|^12/i.test(v) && preds.doppiaChance && preds.doppiaChance.value) {
+          const pickDC = v.replace(/\s.*$/, '').toLowerCase(); // "1x", "x2", "12"
+          const psgDC = String(preds.doppiaChance.value).toLowerCase().replace(/\s.*$/, '');
+          const psgProb = preds.doppiaChance.prob || 0;
+          if (pickDC === psgDC) {
+            if (psgProb >= 65) return { bonus: 1.08, agrees: true };
+            if (psgProb >= 55) return { bonus: 1.04, agrees: true };
+            return { bonus: 1.02, agrees: true };
+          }
+          // Doppie chance diverse possono comunque sovrapporsi (1X e 12 condividono "1")
+          const sharedChars = pickDC.split('').filter(c => psgDC.indexOf(c) >= 0).length;
+          if (sharedChars >= 1) return { bonus: 1.0, agrees: null };
+          return { bonus: 0.95, agrees: false };
+        }
+
         return { bonus: 1.0, agrees: null };
       }
 
