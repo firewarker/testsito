@@ -1,35 +1,33 @@
 // ===================================================
-    // BETTINGPRO v12 - CLEANUP HOME + RISTRUTTURAZIONE FASE 1
+    // BETTINGPRO v12.2 - LAYOUT SPLIT + MULTIGOL MODULE
     // ===================================================
-    // V12 PATCH (rispetto a V11.3):
-    //   FIX BUG CRITICO:
-    //   • Cache Hero Verdetto e openGiudizioFinale ora usano un FINGERPRINT
-    //     dei dati di input (superAnalysis + superAIAnalysis). Prima si
-    //     basavano solo sul tempo (15 min TTL), per cui dopo "Analizza con
-    //     SuperAI" il Coro dei Moduli si aggiornava ma il Verdetto in alto
-    //     restava bloccato sui vecchi numeri.
+    // V12.2 PATCH (rispetto a V12):
+    //   UI:
+    //   • Hero Verdetto + Tachimetro Pressione affiancati in 2 colonne
+    //     (responsive: si impilano su schermi stretti).
+    //   • Bottoni "Giudizio Finale" e "Analizza con SuperAI" spostati al
+    //     posto delle vecchie caselle MG Casa/Ospite (sotto i nomi squadre).
+    //     Layout flex con bottoni grandi e ben visibili.
+    //   • Hero Verdetto in modalita' compact: omette i pill dei 9 moduli
+    //     (visibili comunque nel modal Giudizio Finale) per fare spazio.
+    //   • Tutte le 15 accordion ora CHIUSE di default (incluse le 2 core
+    //     che prima erano aperte). L'utente le apre cliccandole.
     //
-    //   HOME:
-    //   • Rimosso "Colpo del Giorno" su richiesta utente.
-    //   • Aggiunte FASCE ORARIE come filtro: 🌅 Mattino (9-13), ☀️ Pomeriggio
-    //     (13-17), 🌆 Sera (17-21), 🌙 Tarda (21-24). Ogni fascia mostra il
-    //     numero di partite incluse. Filtra le leghe a quelle con almeno una
-    //     partita nella fascia.
+    //   FASE 2 — NUOVO MODULO MULTIGOL (file separato):
+    //   • js/multigol.js → window.Multigol.calculate() / getTopPicks()
+    //     stesso pattern di presagio.js: self-contained, espone API su window
+    //   • Calcola 18 mercati Multigol (12 globali + 3 MG Casa + 3 MG Ospite)
+    //     usando Poisson + Dixon-Coles per coerenza con il resto.
+    //   • Integrato in computeGiudizioFinale: i top 5 Multigol ordinati per
+    //     probabilita' entrano nel ranking dei "Pronostici Classificati"
+    //     invece del singolo MG che c'era prima.
+    //   • Cosi' il Multigol diventa un cittadino di prima classe del
+    //     sistema, non un fanalino di coda.
     //
-    //   PAGINA PARTITA:
-    //   • 4 accordion ora chiuse di default (Presagio, Trap Detector,
-    //     Consensus Engine, Regression Score). Restano aperte solo le 2
-    //     core: "Pronostici AI & Statistico" e "Probabilita' Mercati Principali".
-    //   • Aggiunti 3 divider raggruppanti che spezzano visivamente la pagina
-    //     in blocchi semantici:
-    //       - 📊 Predizioni & Analisi (cyan)
-    //       - 💰 Mercato & Quote (amber)
-    //       - 🔍 Dati & Approfondimenti (purple)
-    //
-    //   RESTA DA FARE (turni successivi):
-    //   • Multigol come pronostico classificato nel Giudizio Finale
-    //   • Sezione "Crea Multipla" auto-generata
-    //   • Refactoring del codice in file separati (engine-poisson.js, ecc.)
+    //   PIANO FUTURO:
+    //   • Turno 3: sezione "Crea Multipla" auto-generata
+    //   • Turno 4: refactoring di engine-math, engine-trap, engine-reverse,
+    //              engine-consensus, engine-giudizio in file separati
     // ===================================================
     
     // ============================================
@@ -12771,28 +12769,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             })()}
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-            ${state.superAIAnalysis && !state.superAIAnalysis.error ? `
-              <div style="display:flex;gap:6px;align-items:center;">
-                <button class="gf-btn" style="margin-top:0;width:auto;padding:8px 14px;font-size:0.78rem;border-radius:10px;" onclick="openGiudizioFinale(${m.id})">
-                  ⚖️ Giudizio Finale
-                </button>
-                <button class="analizza-btn" style="background:rgba(139,92,246,0.15);border-color:rgba(139,92,246,0.3);" onclick="triggerSuperAnalysis()">
-                  &#x26A1; ${state.aiFromCache ? 'Cached — Rianalizza' : 'Rianalizza'}
-                </button>
-                <button onclick="refreshAIAnalysis()" title="Forza aggiornamento ignorando la cache" style="background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);border-radius:10px;padding:6px 10px;cursor:pointer;color:#00d4ff;font-size:0.72rem;">
-                  &#x1F504;
-                </button>
-              </div>
-            ` : `
-              <div style="display:flex;gap:6px;align-items:center;">
-                <button class="gf-btn" style="margin-top:0;width:auto;padding:8px 14px;font-size:0.78rem;border-radius:10px;" onclick="openGiudizioFinale(${m.id})">
-                  ⚖️ Giudizio Finale
-                </button>
-                <button class="analizza-btn ${state.superAnalysisRunning ? 'loading' : ''}" id="analizzaBtn" onclick="triggerSuperAnalysis()">
-                  ${state.superAnalysisRunning ? '&#9203; Analisi in corso...' : '&#128302; ANALIZZA con Super AI'}
-                </button>
-              </div>
-            `}
+            <!-- PATCH V12.1: bottoni "Analizza Super AI" + "Giudizio Finale"
+                 spostati nella sezione hero-actions sotto le squadre. -->
             <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;">
               ${(d.h2h && (d.h2h.matches || d.h2h.totalMatches) >= 3) ? `<span style="font-size:0.6rem;background:rgba(0,229,160,0.12);color:#00e5a0;padding:2px 7px;border-radius:4px;">✔ H2H ${d.h2h.matches || d.h2h.totalMatches} gare</span>` : '<span style="font-size:0.6rem;background:rgba(248,113,113,0.1);color:#f87171;padding:2px 7px;border-radius:4px;">⚠ H2H scarso</span>'}
               ${d.xG && d.xG.total > 0 ? '<span style="font-size:0.6rem;background:rgba(0,212,255,0.1);color:#00d4ff;padding:2px 7px;border-radius:4px;">✔ xG ok</span>' : ''}
@@ -12844,73 +12822,77 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             </div>
           </div>
           
-          <!-- MG CASA / MG OSPITE sotto risultato esatto previsto -->
-          <div class="hero-mg-section">
-            <div class="hero-mg-box">
-              <div class="hero-mg-label">&#x1F3E0; MG ${m.home.name.split(' ')[0]}</div>
-              <div class="hero-mg-value">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
-              <div class="hero-mg-prob">${d.multigoalHome ? d.multigoalHome.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
-            </div>
-            <div class="hero-mg-box">
-              <div class="hero-mg-label">✈️ MG ${m.away.name.split(' ')[0]}</div>
-              <div class="hero-mg-value">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).range : 'N/A'}</div>
-              <div class="hero-mg-prob">${d.multigoalAway ? d.multigoalAway.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'N/A', prob:0}).prob.toFixed(0) : 0}%</div>
-            </div>
+          <!-- PATCH V12.1: caselle MG sostituite con i 2 bottoni di azione
+               (Analizza con SuperAI + Giudizio Finale). I dati MG restano
+               consultabili nelle sezioni accordion sotto. -->
+          <div class="hero-actions-section" style="display:flex;gap:8px;margin:14px 0 8px;flex-wrap:wrap;">
+            <button class="gf-btn" style="flex:1 1 160px;margin:0;padding:11px 14px;font-size:0.82rem;border-radius:12px;font-weight:800;letter-spacing:0.5px;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="openGiudizioFinale(${m.id})">
+              ⚖️ Giudizio Finale
+            </button>
+            ${state.superAIAnalysis && !state.superAIAnalysis.error ? `
+              <button class="analizza-btn" style="flex:1 1 160px;background:rgba(139,92,246,0.15);border-color:rgba(139,92,246,0.35);padding:11px 14px;font-size:0.82rem;border-radius:12px;font-weight:800;letter-spacing:0.5px;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="triggerSuperAnalysis()">
+                &#x26A1; ${state.aiFromCache ? 'Rianalizza (cached)' : 'Rianalizza con SuperAI'}
+              </button>
+            ` : `
+              <button class="analizza-btn ${state.superAnalysisRunning ? 'loading' : ''}" id="analizzaBtn" style="flex:1 1 160px;padding:11px 14px;font-size:0.82rem;border-radius:12px;font-weight:800;letter-spacing:0.5px;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="triggerSuperAnalysis()">
+                ${state.superAnalysisRunning ? '&#9203; Analisi in corso...' : '&#128302; Analizza con SuperAI'}
+              </button>
+            `}
           </div>
-          
+
           <!-- RISULTATO REALE -->
           ${renderRealResult(m, d)}
           
         </div>
         
-        <!-- PATCH V11.1: HERO VERDETTO — sintesi armonica in cima -->
-        ${renderHeroVerdetto(m, d)}
-        
-        <!-- PRESSURE GAUGE (Tachimetro) — xG puro -->
-        ${(() => {
-          if (!d.xG) return '';
-          const homeXG = d.xG.home;
-          const awayXG = d.xG.away;
-          const totalXG = homeXG + awayXG;
-          let homePercent = 50;
-          if (totalXG > 0) homePercent = Math.round((homeXG / totalXG) * 100);
-          homePercent = Math.max(15, Math.min(85, homePercent));
-          const awayPercent = 100 - homePercent;
+        <!-- PATCH V12.1: HERO VERDETTO + TACHIMETRO in layout split (2 colonne) -->
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;align-items:stretch;">
+          <div style="flex:1 1 320px;min-width:280px;">
+            ${renderHeroVerdetto(m, d, /*compact*/ true)}
+          </div>
+          <div style="flex:1 1 240px;min-width:220px;max-width:340px;">
+            ${(() => {
+              if (!d.xG) return '';
+              const homeXG = d.xG.home;
+              const awayXG = d.xG.away;
+              const totalXG = homeXG + awayXG;
+              let homePercent = 50;
+              if (totalXG > 0) homePercent = Math.round((homeXG / totalXG) * 100);
+              homePercent = Math.max(15, Math.min(85, homePercent));
+              const awayPercent = 100 - homePercent;
 
-          // Rotation: 0% home = +90deg (Right), 50% = 0deg (Up), 100% home = -90deg (Left)
-          let rotation = (50 - homePercent) * 1.8;
+              let rotation = (50 - homePercent) * 1.8;
 
-          let domText = "Equilibrio Totale ⚠️";
-          let domColor = "#94a3b8";
-          if (homePercent >= 61) { domText = "Dominio Casa 🏠"; domColor = "#0284c7"; }
-          else if (homePercent >= 54) { domText = "Leggero Vantaggio Casa"; domColor = "#38bdf8"; }
-          else if (awayPercent >= 61) { domText = "Dominio Ospite ✈️"; domColor = "#8b5cf6"; }
-          else if (awayPercent >= 54) { domText = "Leggero Vant. Ospite"; domColor = "#a78bfa"; }
+              let domText = "Equilibrio";
+              let domColor = "#94a3b8";
+              if (homePercent >= 61) { domText = "Dominio Casa"; domColor = "#0284c7"; }
+              else if (homePercent >= 54) { domText = "Vant. Casa"; domColor = "#38bdf8"; }
+              else if (awayPercent >= 61) { domText = "Dominio Ospite"; domColor = "#8b5cf6"; }
+              else if (awayPercent >= 54) { domText = "Vant. Ospite"; domColor = "#a78bfa"; }
 
-          return `
-          <div style="margin-bottom:20px; background:rgba(255,255,255,0.02); border-radius:12px; padding:15px; text-align:center;">
-              <div style="font-size:0.75rem; font-weight:700; color:var(--text-light); margin-bottom:20px; text-transform:uppercase; letter-spacing:1px; display:flex; align-items:center; justify-content:center; gap:8px;">
-                  <span style="font-size:1.1rem;">⚡</span> Tachimetro Pressione Pre-Match
-              </div>
-
-              <div style="position:relative; width:200px; height:100px; margin:0 auto; overflow:hidden;">
-                  <div style="position:absolute; top:0; left:0; width:200px; height:200px; border-radius:50%; background: conic-gradient(from 270deg, #0284c7 0deg, #0284c7 72deg, #94a3b8 72deg, #94a3b8 108deg, #8b5cf6 108deg, #8b5cf6 180deg, transparent 180deg); opacity:0.8;"></div>
-                  <div style="position:absolute; top:30px; left:30px; width:140px; height:140px; background:#080c14; border-radius:50%;"></div>
-                  <div style="position:absolute; bottom:0; left:50%; width:4px; height:80px; background:white; transform-origin:bottom center; transform:translateX(-50%) rotate(${rotation}deg); border-radius:4px; box-shadow: 0 0 10px rgba(255,255,255,0.5); z-index:2; transition:transform 1s cubic-bezier(0.4, 0, 0.2, 1);"></div>
-                  <div style="position:absolute; bottom:-10px; left:50%; width:20px; height:20px; background:white; border-radius:50%; transform:translateX(-50%); z-index:3; box-shadow: 0 0 10px rgba(0,0,0,0.5);"></div>
-              </div>
-
-              <div style="display:flex; justify-content:space-between; margin-top:-10px; font-size:0.8rem; font-weight:800; position:relative; z-index:4; padding:0 10px;">
+              return `
+              <div style="height:100%;background:linear-gradient(135deg,rgba(2,132,199,0.04),rgba(139,92,246,0.04));border:1.5px solid rgba(2,132,199,0.18);border-radius:18px;padding:14px;text-align:center;display:flex;flex-direction:column;justify-content:center;">
+                <div style="font-size:0.62rem;font-weight:900;color:#7dd3fc;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:6px;">
+                  <span style="font-size:0.9rem;">⚡</span> Tachimetro Pressione
+                </div>
+                <div style="position:relative;width:170px;height:85px;margin:0 auto;overflow:hidden;">
+                  <div style="position:absolute;top:0;left:0;width:170px;height:170px;border-radius:50%;background:conic-gradient(from 270deg,#0284c7 0deg,#0284c7 72deg,#94a3b8 72deg,#94a3b8 108deg,#8b5cf6 108deg,#8b5cf6 180deg,transparent 180deg);opacity:0.8;"></div>
+                  <div style="position:absolute;top:25px;left:25px;width:120px;height:120px;background:#080c14;border-radius:50%;"></div>
+                  <div style="position:absolute;bottom:0;left:50%;width:3px;height:68px;background:white;transform-origin:bottom center;transform:translateX(-50%) rotate(${rotation}deg);border-radius:3px;box-shadow:0 0 8px rgba(255,255,255,0.5);z-index:2;transition:transform 1s cubic-bezier(0.4,0,0.2,1);"></div>
+                  <div style="position:absolute;bottom:-8px;left:50%;width:16px;height:16px;background:white;border-radius:50%;transform:translateX(-50%);z-index:3;box-shadow:0 0 8px rgba(0,0,0,0.5);"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;margin-top:-8px;font-size:0.72rem;font-weight:800;padding:0 8px;">
                   <span style="color:#0284c7;">${homePercent}%</span>
                   <span style="color:#8b5cf6;">${awayPercent}%</span>
-              </div>
-
-              <div style="margin-top:15px; font-size:0.9rem; font-weight:800; color:${domColor}; background:rgba(255,255,255,0.03); display:inline-block; padding:6px 16px; border-radius:20px; border:1px solid ${domColor}30;">
+                </div>
+                <div style="margin-top:10px;font-size:0.72rem;font-weight:800;color:${domColor};background:rgba(255,255,255,0.03);display:inline-block;padding:4px 12px;border-radius:16px;border:1px solid ${domColor}30;align-self:center;">
                   ${domText}
-              </div>
-              ${homePercent >= 45 && homePercent <= 55 ? '<div style="margin-top:6px; font-size:0.6rem; color:#f87171;">⚠️ Ago al centro = partita trappola per 1X2</div>' : ''}
-          </div>`;
-        })()}
+                </div>
+                ${homePercent >= 45 && homePercent <= 55 ? '<div style="margin-top:5px;font-size:0.55rem;color:#f87171;">⚠️ Trappola per 1X2</div>' : ''}
+              </div>`;
+            })()}
+          </div>
+        </div>
 
         <!-- PATCH V12: SECTION GROUP HEADER -->
         <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid var(--accent-cyan);background:linear-gradient(90deg,rgba(0,212,255,0.06),transparent);border-radius:4px;">
@@ -12920,7 +12902,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
         <!-- TABS PRONOSTICI: AI + STATISTICO -->
         <div class="section-accordion">
-          <div class="section-accordion-header open" onclick="toggleAccordion(this)">
+          <div class="section-accordion-header" onclick="toggleAccordion(this)">
             <div class="section-accordion-title"><span>🤖</span> Pronostici AI & Statistico</div>
             <div style="display:flex;align-items:center;gap:10px;">
               <span class="section-accordion-meta">${ai.pick} ${ai.prob.toFixed(0)}%</span>
@@ -13249,7 +13231,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
         <!-- SEZIONE A: Probabilità -->
         <div class="section-accordion">
-          <div class="section-accordion-header open" onclick="toggleAccordion(this)">
+          <div class="section-accordion-header" onclick="toggleAccordion(this)">
             <div class="section-accordion-title">
               <span>🎯</span> Probabilità & Mercati Principali
             </div>
@@ -14197,7 +14179,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
     // verdetto del Giudizio Finale (top pick + coro dei moduli + reasons).
     // Usa la stessa cache di gfCache per non costare nulla al re-render.
     // ════════════════════════════════════════════════════════════════════
-    function renderHeroVerdetto(m, d) {
+    function renderHeroVerdetto(m, d, compact) {
       if (!m || !d) return '';
       try {
         const cacheKey = String(m.id);
@@ -14272,9 +14254,11 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         // Prob color
         const probColor = top.prob >= 75 ? '#00e5a0' : top.prob >= 60 ? '#fbbf24' : top.prob >= 45 ? '#00d4ff' : '#94a3b8';
 
-        // Modules pills (compatte)
+        // Modules pills (compatte) — PATCH V12.1: omesse in modalità compact
+        // per fare spazio al Tachimetro affiancato. Il dettaglio dei 9 moduli
+        // resta visibile nel modal Giudizio Finale (sezione "Coro dei Moduli").
         let modulesPills = '';
-        if (v11 && v11.modulesList) {
+        if (!compact && v11 && v11.modulesList) {
           modulesPills = v11.modulesList.slice(0, 9).map(function(mod) {
             const positive = mod.bonus > 1.02;
             const negative = mod.bonus < 0.98;
@@ -14936,13 +14920,35 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         signals: [pOU[3.5].under>=65, totXG<3.0, esProb(s=>s.h+s.a<=3)>=65],
         weights: [3,3,2.5] }));
 
-      // 13. MULTIGOAL migliore
-      if (multigoal && multigoal.length > 0) {
-        const bestMG = multigoal.reduce((best, mg) => mg.prob > best.prob ? mg : best, {range:'1-3', prob:0});
-        if (bestMG.prob > 30) {
-          markets.push(scoreMarket({ value: 'MG ' + bestMG.range, icon: '\u{1F4CA}', prob: bestMG.prob,
-            signals: [bestMG.prob>=55, totXG>=1.5, totXG<=4.5], weights: [3,2,2] }));
+      // 13. MULTIGOL — PATCH V12.2: usa il modulo window.Multigol per i top 5
+      // pronostici Multigol ordinati per probabilita'. Niente piu' un solo MG
+      // dal cherry-picking di analysis.multigol — adesso vengono valutati tutti
+      // i range globali + per squadra e i migliori entrano nel ranking.
+      try {
+        if (typeof window !== 'undefined' && window.Multigol) {
+          const mgTopPicks = window.Multigol.getTopPicks(analysis, {
+            minProb: 55, maxProb: 93, limit: 5
+          });
+          mgTopPicks.forEach(function(mg) {
+            markets.push(scoreMarket({
+              value: mg.label,
+              icon: mg.icon || '\u{1F3AF}',
+              prob: mg.prob,
+              mlKey: mg.label.indexOf('Casa') >= 0 ? 'MG Casa' :
+                     mg.label.indexOf('Ospite') >= 0 ? 'MG Ospite' :
+                     'Multigol',
+              signals: [
+                mg.prob >= 65,
+                totXG >= 1.8 && totXG <= 4.0,
+                // Coerenza con la fascia di gol: se il range include 2-3 gol e xG totale ≈ 2.5, segnale forte
+                (mg.min <= Math.round(totXG) && Math.round(totXG) <= mg.max)
+              ],
+              weights: [3, 2, 3]
+            }));
+          });
         }
+      } catch(e) {
+        console.warn('Multigol V12.2 integration failed:', e);
       }
 
       markets.sort((a, b) => b.superScore - a.superScore);
