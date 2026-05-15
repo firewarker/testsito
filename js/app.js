@@ -1,24 +1,25 @@
 // ===================================================
-    // BETTINGPRO v11 - GIUDIZIO ARMONICO
+    // BETTINGPRO v11.1 - GIUDIZIO ARMONICO + HERO VERDETTO
     // ===================================================
-    // V11 PATCH (rispetto a V10):
-    //   • Giudizio Finale ora dialoga con TUTTI i moduli (7 in piu' rispetto a V10):
-    //       - Trap Detector (13 fattori situazionali, multiplier 0.85-1.05)
-    //       - Reverse Quote Protocol (modello vs sharp, multiplier 0.90-1.08)
-    //       - Reverse xG Protocol (Newton-Raphson Poisson, 0.88-1.08)
-    //       - Presagio (5 metriche + 6 predizioni, 0.92-1.10)
-    //       - Regression Score (grade-based 0.88-1.10)
-    //       - Consensus Engine (agreement-weighted 1.0-1.12)
-    //       - Gap Analyzer (xG differential 0.90-1.10)
-    //     I 7 moltiplicatori si moltiplicano nello score finale dei mercati.
-    //   • Nuova sezione "Coro dei Moduli" nel modal Giudizio Finale:
-    //     mostra quali moduli supportano il top pick e quali lo contraddicono,
-    //     con un punteggio di armonia (es. "7/9 ARMONIA ALTA").
-    //   • Auto-reveal Presagio: rimosso bottone "ANALIZZA", i risultati
-    //     compaiono automaticamente con fade-in CSS quando si apre la partita.
-    //   • Home: rimossa sezione "Trova i Migliori Pick" (richiesta utente).
-    //   • Console: rimossi log "Daily picks" e "Trader picks" (rumore).
-    // V10 PATCH (richiamato): tracking quote REALI + Market Reality Check
+    // V11.1 PATCH (rispetto a V11):
+    //   • BUGFIX: getRevQuoteBonus_v11 ora legge state.oddsLab (era 'oddsLab'
+    //     undefined, causava ReferenceError sul click "Giudizio Finale").
+    //   • Anche v11_modulesActive.revQuote ora usa state.oddsLab.
+    //   • NUOVO Hero Verdetto: banner in cima alla pagina partita con
+    //     top pick + percentuale grande + coro dei moduli + seconda scelta
+    //     + CTA per aprire il Giudizio Finale completo. Usa la cache gfCache
+    //     per non costare nulla al re-render.
+    //
+    // V11 PATCH (ricapitolato):
+    //   • generateAIAdvice + computeGiudizioFinale dialogano con 7 moduli
+    //     laterali (Trap, RevQuote, RevXg, Presagio, Regression, Consensus,
+    //     Gap). Ogni modulo applica un moltiplicatore al superScore.
+    //   • Coro dei Moduli nel modal: barra di armonia (es. 7/9 ALTA).
+    //   • Auto-reveal Presagio: rimosso bottone ANALIZZA.
+    //   • Rimossa sezione "Trova i Migliori Pick" dalla home.
+    //   • Rimossi console.log Daily/Trader picks (rumore).
+    //
+    // V10 (ricapitolato): tracking quote REALI + Market Reality Check.
     // ===================================================
     
     // ============================================
@@ -12760,6 +12761,9 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           
         </div>
         
+        <!-- PATCH V11.1: HERO VERDETTO — sintesi armonica in cima -->
+        ${renderHeroVerdetto(m, d)}
+        
         <!-- PRESSURE GAUGE (Tachimetro) — xG puro -->
         ${(() => {
           if (!d.xG) return '';
@@ -14056,6 +14060,128 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       renderGiudizioFinaleModal(m, d, giudizio, gfCache[cacheKey]);
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // PATCH V11.1: HERO VERDETTO
+    // Banner sintetico in cima alla pagina partita che riassume il
+    // verdetto del Giudizio Finale (top pick + coro dei moduli + reasons).
+    // Usa la stessa cache di gfCache per non costare nulla al re-render.
+    // ════════════════════════════════════════════════════════════════════
+    function renderHeroVerdetto(m, d) {
+      if (!m || !d) return '';
+      try {
+        const cacheKey = String(m.id);
+        const cached = gfCache[cacheKey];
+        const HV_TTL = 15 * 60 * 1000;
+        let giudizio;
+        const now = Date.now();
+        if (cached && cached.data && (now - cached.timestamp) < HV_TTL) {
+          giudizio = cached.data;
+        } else {
+          giudizio = computeGiudizioFinale(m, d, state.superAnalysis, state.superAIAnalysis);
+          if (!gfCache[cacheKey]) {
+            gfCache[cacheKey] = { timestamp: now, data: giudizio, history: [] };
+          } else {
+            gfCache[cacheKey].timestamp = now;
+            gfCache[cacheKey].data = giudizio;
+          }
+          try { saveGFCache(); } catch(e) {}
+        }
+        if (!giudizio || !giudizio.topMarkets || giudizio.topMarkets.length === 0) return '';
+        const top = giudizio.topMarkets[0];
+        const second = giudizio.topMarkets[1];
+        const v11 = top.v11 || null;
+
+        // Coro dei moduli (se presente)
+        let coroN = 0, coroTot = 0, coroLabel = '', coroColor = '#64748b';
+        if (v11 && v11.modulesList) {
+          coroN = v11.supporting || 0;
+          coroTot = v11.totalModules || 0;
+          const ratio = coroTot > 0 ? coroN / coroTot : 0;
+          if (ratio >= 0.7) { coroLabel = 'ARMONIA ALTA'; coroColor = '#00e5a0'; }
+          else if (ratio >= 0.45) { coroLabel = 'ARMONIA MEDIA'; coroColor = '#fbbf24'; }
+          else { coroLabel = 'DISACCORDO'; coroColor = '#f87171'; }
+        }
+
+        // Confidence visualization
+        const confLabel = top.confidence === 'high' ? 'ALTA' : top.confidence === 'mid' ? 'MEDIA' : 'BASSA';
+        const confColor = top.confidence === 'high' ? '#00e5a0' : top.confidence === 'mid' ? '#fbbf24' : '#f87171';
+
+        // Prob color
+        const probColor = top.prob >= 75 ? '#00e5a0' : top.prob >= 60 ? '#fbbf24' : top.prob >= 45 ? '#00d4ff' : '#94a3b8';
+
+        // Modules pills (compatte)
+        let modulesPills = '';
+        if (v11 && v11.modulesList) {
+          modulesPills = v11.modulesList.slice(0, 9).map(function(mod) {
+            const positive = mod.bonus > 1.02;
+            const negative = mod.bonus < 0.98;
+            const c = positive ? '#00e5a0' : negative ? '#f87171' : '#64748b';
+            const icon = positive ? '\u2713' : negative ? '\u2717' : '\u2796';
+            return '<span style="font-size:0.58rem;background:rgba(' + (positive ? '0,229,160' : negative ? '248,113,113' : '100,116,139') + ',0.10);color:' + c + ';padding:3px 7px;border-radius:5px;font-weight:600;white-space:nowrap;">' + icon + ' ' + mod.name + '</span>';
+          }).join('');
+        }
+
+        return '' +
+          '<div class="hero-verdetto" style="margin-bottom:18px;background:linear-gradient(135deg,rgba(0,212,255,0.06),rgba(168,85,247,0.06),rgba(0,229,160,0.04));border:1.5px solid rgba(0,212,255,0.22);border-radius:18px;padding:18px 20px;position:relative;overflow:hidden;">' +
+            // Glow accent
+            '<div style="position:absolute;top:-30px;right:-30px;width:120px;height:120px;background:radial-gradient(circle,rgba(0,212,255,0.15),transparent 70%);pointer-events:none;"></div>' +
+            // Header
+            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;position:relative;z-index:1;">' +
+              '<span style="font-size:1.3rem;">\u2696\uFE0F</span>' +
+              '<div style="flex:1;">' +
+                '<div style="font-size:0.7rem;font-weight:900;letter-spacing:1.2px;color:#00d4ff;text-transform:uppercase;">Verdetto BettingPro</div>' +
+                '<div style="font-size:0.58rem;color:var(--text-dark);margin-top:1px;">Sintesi armonica di 9 moduli analitici</div>' +
+              '</div>' +
+              '<span style="font-size:0.55rem;background:rgba(168,85,247,0.12);color:#c084fc;padding:3px 8px;border-radius:6px;font-weight:700;letter-spacing:0.5px;">V11</span>' +
+            '</div>' +
+            // Main body: pick + prob + coro
+            '<div style="display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center;margin-bottom:14px;position:relative;z-index:1;">' +
+              // Pick + prob
+              '<div>' +
+                '<div style="font-size:0.62rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Pronostico Principale</div>' +
+                '<div style="font-size:1.5rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:6px;">' + top.icon + ' ' + esc(top.value) + '</div>' +
+                '<div style="display:flex;align-items:baseline;gap:10px;">' +
+                  '<div style="font-size:2.2rem;font-weight:900;color:' + probColor + ';line-height:1;">' + top.prob.toFixed(0) + '<span style="font-size:1.2rem;">%</span></div>' +
+                  '<div style="display:flex;flex-direction:column;gap:2px;">' +
+                    '<span style="font-size:0.55rem;background:' + confColor + '20;color:' + confColor + ';padding:3px 8px;border-radius:5px;font-weight:800;letter-spacing:0.5px;">CONF. ' + confLabel + '</span>' +
+                    (top.mlAccuracy ? '<span style="font-size:0.55rem;color:var(--text-dark);padding:0 8px;">ML acc. ' + top.mlAccuracy + '%</span>' : '') +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              // Coro dei moduli
+              (coroTot > 0 ? (
+                '<div style="text-align:center;border-left:1px solid rgba(255,255,255,0.06);padding-left:18px;">' +
+                  '<div style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:3px;">\u{1F3B5} Coro Moduli</div>' +
+                  '<div style="font-size:1.8rem;font-weight:900;color:' + coroColor + ';line-height:1;">' + coroN + '<span style="font-size:1rem;color:var(--text-dark);">/' + coroTot + '</span></div>' +
+                  '<div style="font-size:0.55rem;color:' + coroColor + ';font-weight:800;letter-spacing:0.4px;margin-top:2px;">' + coroLabel + '</div>' +
+                '</div>'
+              ) : '') +
+            '</div>' +
+            // Modules pills row
+            (modulesPills ? (
+              '<div style="display:flex;flex-wrap:wrap;gap:4px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
+                modulesPills +
+              '</div>'
+            ) : '') +
+            // Alternative pick (second best)
+            (second ? (
+              '<div style="display:flex;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
+                '<span style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.6px;">Seconda scelta</span>' +
+                '<span style="font-size:0.78rem;color:#fff;font-weight:700;">' + second.icon + ' ' + esc(second.value) + '</span>' +
+                '<span style="font-size:0.7rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
+              '</div>'
+            ) : '') +
+            // CTA button
+            '<button onclick="openGiudizioFinale(' + m.id + ')" style="margin-top:14px;width:100%;background:linear-gradient(135deg,rgba(0,212,255,0.12),rgba(168,85,247,0.12));border:1px solid rgba(0,212,255,0.3);color:#00d4ff;padding:10px;border-radius:10px;cursor:pointer;font-weight:700;font-size:0.78rem;letter-spacing:0.5px;display:flex;align-items:center;justify-content:center;gap:8px;position:relative;z-index:1;">' +
+              '<span>\u{1F50D}</span> Vedi tutti i 10 pronostici e il dettaglio del coro <span>\u2192</span>' +
+            '</button>' +
+          '</div>';
+      } catch(e) {
+        console.warn('renderHeroVerdetto error:', e);
+        return '';
+      }
+    }
+
     function computeGiudizioFinale(match, analysis, superAnalysis, superAIAnalysis) {
       const { xG, p1X2, pOU, pBTTS, exactScores, multigoal, multigoalHome, multigoalAway,
               temporalDistribution, h2hInfo, corners, cards, homeForm, awayForm } = analysis;
@@ -14171,12 +14297,13 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       // Helper: estrae bonus Reverse Quote per il pick specifico
       // (riusa logica di V10 ma in versione inline per evitare dipendenze)
       function getRevQuoteBonus_v11(pickValue, modelProb) {
-        if (!oddsLab || !oddsLab.bookmakers || oddsLab.bookmakers.length === 0) return 1.0;
+        const oddsLab_v11 = state.oddsLab;
+        if (!oddsLab_v11 || !oddsLab_v11.bookmakers || oddsLab_v11.bookmakers.length === 0) return 1.0;
         const v = (pickValue || '').toLowerCase();
         // Solo OU 2.5 e GG/NG sono valutabili (le quote 1X2 le vediamo via gap+bk)
         if (!/over 2\.5|under 2\.5|^gg|^ng/i.test(v)) return 1.0;
         let avgO=0, avgU=0, avgGG=0, avgNG=0, countO=0, countG=0;
-        oddsLab.bookmakers.forEach(function(bm) {
+        oddsLab_v11.bookmakers.forEach(function(bm) {
           if (bm.ou25 && bm.ou25.over > 1 && bm.ou25.under > 1) { avgO+=bm.ou25.over; avgU+=bm.ou25.under; countO++; }
           if (bm.btts && bm.btts.yes > 1 && bm.btts.no > 1) { avgGG+=bm.btts.yes; avgNG+=bm.btts.no; countG++; }
         });
@@ -14565,7 +14692,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           regression: !!regressionData_v11,
           consensus: !!consensusData_v11,
           gap: true,
-          revQuote: !!(oddsLab && oddsLab.bookmakers && oddsLab.bookmakers.length > 0)
+          revQuote: !!(state.oddsLab && state.oddsLab.bookmakers && state.oddsLab.bookmakers.length > 0)
         }
       };
 
