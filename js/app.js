@@ -1,25 +1,35 @@
 // ===================================================
-    // BETTINGPRO v11.1 - GIUDIZIO ARMONICO + HERO VERDETTO
+    // BETTINGPRO v11.2 - FIX MATEMATICO + LABELING ONESTO
     // ===================================================
-    // V11.1 PATCH (rispetto a V11):
-    //   • BUGFIX: getRevQuoteBonus_v11 ora legge state.oddsLab (era 'oddsLab'
-    //     undefined, causava ReferenceError sul click "Giudizio Finale").
-    //   • Anche v11_modulesActive.revQuote ora usa state.oddsLab.
-    //   • NUOVO Hero Verdetto: banner in cima alla pagina partita con
-    //     top pick + percentuale grande + coro dei moduli + seconda scelta
-    //     + CTA per aprire il Giudizio Finale completo. Usa la cache gfCache
-    //     per non costare nulla al re-render.
+    // V11.2 PATCH (rispetto a V11.1):
+    //   FIX MATEMATICI (cose che davano numeri sistematicamente errati):
+    //   • quickCalc1X2: ora applica Dixon-Coles tau (era Poisson puro).
+    //     Coerenza con calcExactScores. Correzione 3-5% sulle prob di X
+    //     in partite low-xG, dove prima il sistema si contraddiceva.
+    //   • quickCalcOver: stesso fix, con normalizzazione corretta su somma totale.
+    //   • calcMultigol: stesso fix Dixon-Coles + normalizzazione.
+    //   • quickCalcBTTS: rimossa la divisione per 1.06/0.95 che neutralizzava
+    //     artificialmente il home advantage. Il home advantage e' parte della
+    //     realta' della partita, non un artefatto. Toglierlo produceva
+    //     BTTS sistematicamente sottostimati su tutte le partite.
+    //   • pBTTS clamp esteso da [15,85] a [5,95]: partite estreme (top vs
+    //     last) potevano avere veri BTTS fuori da [15,85] ma erano tagliati.
     //
-    // V11 PATCH (ricapitolato):
-    //   • generateAIAdvice + computeGiudizioFinale dialogano con 7 moduli
-    //     laterali (Trap, RevQuote, RevXg, Presagio, Regression, Consensus,
-    //     Gap). Ogni modulo applica un moltiplicatore al superScore.
-    //   • Coro dei Moduli nel modal: barra di armonia (es. 7/9 ALTA).
-    //   • Auto-reveal Presagio: rimosso bottone ANALIZZA.
-    //   • Rimossa sezione "Trova i Migliori Pick" dalla home.
-    //   • Rimossi console.log Daily/Trader picks (rumore).
-    //
-    // V10 (ricapitolato): tracking quote REALI + Market Reality Check.
+    //   FIX UX (cose che dicevano il falso all'utente):
+    //   • "Coro dei Moduli": labeling ora distingue 5 stati invece di 3.
+    //     - ARMONIA ALTA (>=6 a favore, <=1 contro)
+    //     - PROPENSIONE+ (4-5 a favore, <=2 contro)
+    //     - CONFLITTO (>=3 a favore E >=3 contro: mercato spaccato)
+    //     - DUBBI (>=3 contro, supporting <= contradicting)
+    //     - NEUTRO (>=5 moduli non si esprimono)
+    //     - INCERTO (caso residuo)
+    //     Risolve il bug "1/9 DISACCORDO" mostrato anche quando in realta'
+    //     7 moduli su 9 erano neutri (non sapevano), non contrari.
+    //   • Breakdown 3-way nel modal: "X a favore / Y neutri / Z contro"
+    //     visibile sempre, non solo se conflitto.
+    //   • Coerenza Verdetto Oracle AI vs Top Pick: se l'Oracle suggerisce
+    //     un mercato e il ranking Score Composito ne classifica un altro
+    //     al #1, ora compare un warning esplicito che spiega perche'.
     // ===================================================
     
     // ============================================
@@ -2123,12 +2133,19 @@
       if (isNaN(lH) || isNaN(lA) || lH < 0 || lA < 0) {
         return { home: 33.33, draw: 33.33, away: 33.33 };
       }
-      
+
+      // PATCH V11.2: applica Dixon-Coles tau (era Poisson puro).
+      // Coerenza con calcExactScores che gia' usava tau.
+      const rho = calcDixonColesRho(lH, lA);
+
       let pH = 0, pD = 0, pA = 0;
       for (let i = 0; i <= 5; i++) {
         for (let j = 0; j <= 5; j++) {
-          const p = poisson(lH, i) * poisson(lA, j);
-          if (isNaN(p)) continue;
+          const rawP = poisson(lH, i) * poisson(lA, j);
+          if (isNaN(rawP)) continue;
+          const tau = dixonColesTau(i, j, lH, lA, rho);
+          const p = rawP * tau;
+          if (p <= 0 || isNaN(p)) continue;
           if (i > j) pH += p; else if (i === j) pD += p; else pA += p;
         }
       }
@@ -2140,17 +2157,26 @@
     function quickCalcOver(lH, lA, line) {
       // Validazione input
       if (isNaN(lH) || isNaN(lA) || lH < 0 || lA < 0) return 50;
-      
-      let pUnder = 0;
+
+      // PATCH V11.2: applica Dixon-Coles tau e normalizza per coerenza
+      // con calcExactScores. Il tau distorce leggermente la somma totale,
+      // quindi serve dividere per la somma effettiva.
+      const rho = calcDixonColesRho(lH, lA);
+
+      let pUnder = 0, total = 0;
       for (let i = 0; i <= 5; i++) {
         for (let j = 0; j <= 5; j++) {
-          if (i + j <= Math.floor(line)) {
-            const p = poisson(lH, i) * poisson(lA, j);
-            if (!isNaN(p)) pUnder += p;
-          }
+          const rawP = poisson(lH, i) * poisson(lA, j);
+          if (isNaN(rawP)) continue;
+          const tau = dixonColesTau(i, j, lH, lA, rho);
+          const p = rawP * tau;
+          if (p <= 0 || isNaN(p)) continue;
+          total += p;
+          if (i + j <= Math.floor(line)) pUnder += p;
         }
       }
-      const over = (1 - pUnder) * 100;
+      if (total <= 0 || isNaN(total)) return 50;
+      const over = (1 - pUnder/total) * 100;
       if (isNaN(over)) return 50;
       return clamp(10, over, 90);
     }
@@ -2158,13 +2184,13 @@
     function quickCalcBTTS(lH, lA, homeData, awayData) {
       // Validazione input
       if (isNaN(lH) || isNaN(lA) || lH < 0 || lA < 0) return 50;
-      
-      // Base Poisson: P(home ≥ 1) × P(away ≥ 1) — senza home advantage bias
-      // Per BTTS usiamo xG "neutri" (annulliamo il bias 1X2)
-      const neutralH = lH / 1.06 * 1.00; // rimuovi home boost
-      const neutralA = lA / 0.95 * 1.00; // rimuovi away penalty
-      const poissonBTTS = (1 - poisson(neutralH, 0)) * (1 - poisson(neutralA, 0)) * 100;
-      
+
+      // PATCH V11.2: usa gli xG REALI senza neutralizzare il home advantage.
+      // Il home advantage e' parte della realta' della partita, non un artefatto
+      // da rimuovere. Toglierlo produceva BTTS sistematicamente sottostimati.
+      // P(BTTS) = P(home segna >=1) * P(away segna >=1) assumendo indipendenza.
+      const poissonBTTS = (1 - poisson(lH, 0)) * (1 - poisson(lA, 0)) * 100;
+
       if (isNaN(poissonBTTS)) return 50;
       
       // Se abbiamo dati difensivi, correggi con clean sheet e goals conceded
@@ -4584,7 +4610,10 @@ async function analyzeMatch(match) {
       
       // Media ponderata: 60% Poisson, 40% storico
       pBTTS = (pBTTS * 0.60) + (historicalBTTS * 0.40);
-      pBTTS = clamp(15, pBTTS, 85);
+      // PATCH V11.2: clamp esteso da [15,85] a [5,95]. Per partite estreme
+      // (squadra fortissima vs disastrata), il vero BTTS puo' uscire da [15,85]
+      // e limitarlo artificialmente nascondeva segnali validi.
+      pBTTS = clamp(5, pBTTS, 95);
       
       const exactScores = calcExactScores(homeXG, awayXG);
       
@@ -4919,14 +4948,23 @@ async function analyzeMatch(match) {
     }
 
     function calcMultigol(lH, lA, min, max) {
-      let prob = 0;
+      // PATCH V11.2: applica Dixon-Coles tau (era Poisson puro), per coerenza
+      // con calcExactScores e quickCalc1X2/Over.
+      const rho = calcDixonColesRho(lH, lA);
+      let prob = 0, total = 0;
       for (let i = 0; i <= 6; i++) {
         for (let j = 0; j <= 6; j++) {
+          const rawP = poisson(lH, i) * poisson(lA, j);
+          if (isNaN(rawP)) continue;
+          const tau = dixonColesTau(i, j, lH, lA, rho);
+          const p = rawP * tau;
+          if (p <= 0 || isNaN(p)) continue;
+          total += p;
           const t = i + j;
-          if (t >= min && t <= max) prob += poisson(lH, i) * poisson(lA, j);
+          if (t >= min && t <= max) prob += p;
         }
       }
-      return prob * 100;
+      return total > 0 ? (prob / total) * 100 : 0;
     }
     
     // Calcola TUTTI i range multigoal
@@ -14091,15 +14129,28 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         const second = giudizio.topMarkets[1];
         const v11 = top.v11 || null;
 
-        // Coro dei moduli (se presente)
-        let coroN = 0, coroTot = 0, coroLabel = '', coroColor = '#64748b';
+        // PATCH V11.2: Coro dei moduli con labeling intelligente.
+        // Distingue 5 stati invece di 3, valorizzando i neutri.
+        let coroN = 0, coroNeu = 0, coroCon = 0, coroTot = 0;
+        let coroLabel = '', coroColor = '#64748b';
         if (v11 && v11.modulesList) {
           coroN = v11.supporting || 0;
+          coroNeu = v11.neutral || 0;
+          coroCon = v11.contradicting || 0;
           coroTot = v11.totalModules || 0;
-          const ratio = coroTot > 0 ? coroN / coroTot : 0;
-          if (ratio >= 0.7) { coroLabel = 'ARMONIA ALTA'; coroColor = '#00e5a0'; }
-          else if (ratio >= 0.45) { coroLabel = 'ARMONIA MEDIA'; coroColor = '#fbbf24'; }
-          else { coroLabel = 'DISACCORDO'; coroColor = '#f87171'; }
+
+          // Logica labeling:
+          // - ARMONIA ALTA: ≥6/9 supportano e ≤1 contraddice
+          // - PROPENSIONE +: 4-5 supportano e ≤2 contraddicono
+          // - NEUTRO: maggioranza neutri (≥5/9), nessun bias chiaro
+          // - DUBBI: 3+ contraddicono e supporting ≤ contradicting
+          // - CONFLITTO: 3+ a favore E 3+ contro (mercato spaccato)
+          if (coroN >= 6 && coroCon <= 1)          { coroLabel = 'ARMONIA ALTA';   coroColor = '#00e5a0'; }
+          else if (coroN >= 3 && coroCon >= 3)     { coroLabel = 'CONFLITTO';      coroColor = '#f59e0b'; }
+          else if (coroN >= 4 && coroCon <= 2)     { coroLabel = 'PROPENSIONE +'; coroColor = '#10b981'; }
+          else if (coroCon >= 3 && coroN <= coroCon) { coroLabel = 'DUBBI';        coroColor = '#f87171'; }
+          else if (coroNeu >= 5)                   { coroLabel = 'NEUTRO';         coroColor = '#94a3b8'; }
+          else                                     { coroLabel = 'INCERTO';        coroColor = '#fbbf24'; }
         }
 
         // Confidence visualization
@@ -14759,6 +14810,22 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             ai.warningFlags.map(w => '<div style="font-size:0.68rem;color:#f87171;">\u26A0\uFE0F ' + esc(w) + '</div>').join('') +
             '</div>'
           ) : '') +
+          // PATCH V11.2: check coerenza Verdetto Oracle vs Top Pick (Score Composito).
+          // Se l'Oracle dice una cosa e il ranking ne classifica un'altra al #1,
+          // l'utente deve saperlo invece di vedere due cose contraddittorie.
+          (function() {
+            try {
+              const topPickValue = giudizio.topMarkets[0] && giudizio.topMarkets[0].value;
+              if (!ai.bestPick || !topPickValue) return '';
+              const aiP = ai.bestPick.toLowerCase().replace(/\s*\(.*?\)\s*/g, '').trim();
+              const tpP = topPickValue.toLowerCase().replace(/\s*\(.*?\)\s*/g, '').trim();
+              const aligned = aiP === tpP || aiP.indexOf(tpP) >= 0 || tpP.indexOf(aiP) >= 0;
+              if (aligned) return '';
+              return '<div style="margin-top:10px;padding:8px 10px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:0.65rem;color:#fbbf24;">' +
+                '\u26A0\uFE0F <strong>Divergenza interna</strong>: Oracle AI suggerisce "<strong>' + esc(ai.bestPick) + '</strong>" mentre lo Score Composito mette al primo posto "<strong>' + esc(topPickValue) + '</strong>". Le due metriche pesano segnali diversi: l\'Oracle usa news e contesto squadre, lo Score combina prob + convergenza dei moduli statistici. Considera entrambe le opzioni.' +
+                '</div>';
+            } catch(e) { return ''; }
+          })() +
           '</div>\n'
         ) : (
           '<div class="gf-cached-notice">\u{1F916} Oracle AI non ancora eseguito \u2014 clicca "ANALIZZA con Super AI" per dati piu\u0300 completi</div>\n'
@@ -14772,8 +14839,8 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           '</div>'
         ) : '') +
 
-        // PATCH V11: CORO DEI MODULI
-        // Mostra quali moduli supportano il TOP pick e quali lo contraddicono
+        // PATCH V11.2: CORO DEI MODULI con labeling intelligente
+        // Distingue 5 stati: ARMONIA ALTA / PROPENSIONE+ / NEUTRO / CONFLITTO / DUBBI / INCERTO
         (giudizio.topMarkets[0] && giudizio.topMarkets[0].v11 ? (function() {
           const top = giudizio.topMarkets[0];
           const v11 = top.v11;
@@ -14783,9 +14850,19 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           const neu = mods.filter(m => m.bonus >= 0.98 && m.bonus <= 1.02);
           const totalActive = mods.length;
           const supN = sup.length;
-          const harmonyScore = Math.round((supN / totalActive) * 100);
-          const harmonyColor = harmonyScore >= 70 ? '#00e5a0' : harmonyScore >= 45 ? '#fbbf24' : '#f87171';
-          const harmonyLabel = harmonyScore >= 70 ? 'ARMONIA ALTA' : harmonyScore >= 45 ? 'ARMONIA MEDIA' : 'DISACCORDO';
+          const conN = con.length;
+          const neuN = neu.length;
+
+          let harmonyLabel, harmonyColor;
+          if (supN >= 6 && conN <= 1)              { harmonyLabel = 'ARMONIA ALTA';  harmonyColor = '#00e5a0'; }
+          else if (supN >= 3 && conN >= 3)         { harmonyLabel = 'CONFLITTO';     harmonyColor = '#f59e0b'; }
+          else if (supN >= 4 && conN <= 2)         { harmonyLabel = 'PROPENSIONE +'; harmonyColor = '#10b981'; }
+          else if (conN >= 3 && supN <= conN)      { harmonyLabel = 'DUBBI';         harmonyColor = '#f87171'; }
+          else if (neuN >= 5)                      { harmonyLabel = 'NEUTRO';        harmonyColor = '#94a3b8'; }
+          else                                     { harmonyLabel = 'INCERTO';       harmonyColor = '#fbbf24'; }
+
+          // Counter display: "4/9" mostra solo i supportanti ma con sotto-info chiara
+          const counterDisplay = supN + '/' + totalActive;
 
           return '<div class="gf-section" style="background:linear-gradient(135deg,rgba(0,212,255,0.04),rgba(168,85,247,0.04));border:1px solid rgba(0,212,255,0.18);border-radius:14px;padding:16px;margin-bottom:14px;">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">' +
@@ -14799,10 +14876,16 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               '</div>' +
             '</div>' +
             // Bar visualization
-            '<div style="display:flex;height:8px;background:rgba(255,255,255,0.04);border-radius:6px;overflow:hidden;margin-bottom:12px;">' +
+            '<div style="display:flex;height:8px;background:rgba(255,255,255,0.04);border-radius:6px;overflow:hidden;margin-bottom:8px;">' +
               '<div style="width:' + (supN/totalActive*100) + '%;background:#00e5a0;"></div>' +
-              '<div style="width:' + (neu.length/totalActive*100) + '%;background:#64748b;opacity:0.5;"></div>' +
-              '<div style="width:' + (con.length/totalActive*100) + '%;background:#f87171;"></div>' +
+              '<div style="width:' + (neuN/totalActive*100) + '%;background:#64748b;opacity:0.5;"></div>' +
+              '<div style="width:' + (conN/totalActive*100) + '%;background:#f87171;"></div>' +
+            '</div>' +
+            // PATCH V11.2: breakdown numerico 3-way per chiarezza
+            '<div style="display:flex;justify-content:center;gap:14px;margin-bottom:12px;font-size:0.62rem;font-weight:700;">' +
+              '<span style="color:#00e5a0;">\u2713 ' + supN + ' a favore</span>' +
+              '<span style="color:#94a3b8;">\u2796 ' + neuN + ' neutri</span>' +
+              '<span style="color:#f87171;">\u2717 ' + conN + ' contro</span>' +
             '</div>' +
             // Modules list as pills
             '<div style="display:flex;flex-wrap:wrap;gap:5px;">' +
@@ -14818,8 +14901,11 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
                 '</span>';
               }).join('') +
             '</div>' +
-            (con.length >= 3 ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;font-size:0.62rem;color:#f87171;">\u26A0\uFE0F ' + con.length + ' moduli contraddicono il top pick. Valuta con cautela o considera un\'alternativa dalla lista sotto.</div>' : '') +
-            (supN >= 6 && con.length === 0 ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:8px;font-size:0.62rem;color:#00e5a0;">\u2728 Convergenza forte: ' + supN + ' moduli su ' + totalActive + ' supportano. Pick di alto consenso.</div>' : '') +
+            // PATCH V11.2: messaggi contestuali piu' precisi
+            (harmonyLabel === 'DUBBI' ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;font-size:0.62rem;color:#f87171;">\u26A0\uFE0F ' + conN + ' moduli contraddicono attivamente il top pick. Valuta con cautela o considera un\'alternativa dalla lista sotto.</div>' : '') +
+            (harmonyLabel === 'CONFLITTO' ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:8px;font-size:0.62rem;color:#f59e0b;">\u26A0\uFE0F Conflitto: ' + supN + ' moduli a favore e ' + conN + ' contro. Il mercato e\' spaccato — considera di saltare la partita o giocare stake ridotto.</div>' : '') +
+            (harmonyLabel === 'NEUTRO' ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(100,116,139,0.06);border:1px solid rgba(100,116,139,0.2);border-radius:8px;font-size:0.62rem;color:#94a3b8;">\u2139\uFE0F La maggior parte dei moduli non si esprime su questo pick (' + neuN + ' neutri). Il top pick si basa principalmente sui segnali statistici base, senza conferme aggiuntive forti.</div>' : '') +
+            (harmonyLabel === 'ARMONIA ALTA' ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:8px;font-size:0.62rem;color:#00e5a0;">\u2728 Convergenza forte: ' + supN + ' moduli su ' + totalActive + ' supportano. Pick di alto consenso.</div>' : '') +
           '</div>';
         })() : '') +
 
