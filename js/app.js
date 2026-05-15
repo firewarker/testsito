@@ -1,18 +1,24 @@
 // ===================================================
-    // BETTINGPRO v10 - CONSIGLIO AI ARMONIZZATO
+    // BETTINGPRO v11 - GIUDIZIO ARMONICO
     // ===================================================
-    // V10 PATCH (rispetto a V9.1):
-    //   • generateAIAdvice ora dialoga con TUTTI i moduli:
-    //       - Reverse Quote Protocol (OU/BTTS + 1X2)
-    //       - Trap Detector (13 fattori situazionali)
-    //       - Presagio (5 metriche di pre-analisi)
-    //       - Super AI / Oracle (analisi news)
-    //     Risultato: confidence calibrata, probabilita' fusa col mercato,
-    //     consensus negativo declassa, consensus positivo conferma.
-    //   • Tracking quote REALI dei bookmaker invece di sintetiche (100/prob).
-    //     I bet legacy vengono marcati con flag syntheticOdds=true.
-    //   • getRealROIStats() / getSyntheticROIStats() esposti su window
-    //     per misurare ROI vero vs ROI storico inflato dalle quote sintetiche.
+    // V11 PATCH (rispetto a V10):
+    //   • Giudizio Finale ora dialoga con TUTTI i moduli (7 in piu' rispetto a V10):
+    //       - Trap Detector (13 fattori situazionali, multiplier 0.85-1.05)
+    //       - Reverse Quote Protocol (modello vs sharp, multiplier 0.90-1.08)
+    //       - Reverse xG Protocol (Newton-Raphson Poisson, 0.88-1.08)
+    //       - Presagio (5 metriche + 6 predizioni, 0.92-1.10)
+    //       - Regression Score (grade-based 0.88-1.10)
+    //       - Consensus Engine (agreement-weighted 1.0-1.12)
+    //       - Gap Analyzer (xG differential 0.90-1.10)
+    //     I 7 moltiplicatori si moltiplicano nello score finale dei mercati.
+    //   • Nuova sezione "Coro dei Moduli" nel modal Giudizio Finale:
+    //     mostra quali moduli supportano il top pick e quali lo contraddicono,
+    //     con un punteggio di armonia (es. "7/9 ARMONIA ALTA").
+    //   • Auto-reveal Presagio: rimosso bottone "ANALIZZA", i risultati
+    //     compaiono automaticamente con fade-in CSS quando si apre la partita.
+    //   • Home: rimossa sezione "Trova i Migliori Pick" (richiesta utente).
+    //   • Console: rimossi log "Daily picks" e "Trader picks" (rumore).
+    // V10 PATCH (richiamato): tracking quote REALI + Market Reality Check
     // ===================================================
     
     // ============================================
@@ -2016,7 +2022,7 @@
       picks.raddoppi = buildRaddoppi(safeBets);
       
       state.dailyPicks = picks;
-      console.log('&#x1F3AF; Daily picks (AI):', Object.keys(picks).map(k => `${k}: ${picks[k].length}`).join(', '));
+      // PATCH V11: console.log Daily picks rimosso (rumore in console).
       
       // Salva picks in localStorage per persistenza (anche dopo che le partite finiscono)
       try {
@@ -2707,9 +2713,7 @@
       state.traderPicks.raddoppio = raddoppioPicks.sort((a, b) => b.bet.prob - a.bet.prob).slice(0, 4);
       state.traderPicks.singole = singolePicks.sort((a, b) => b.bet.prob - a.bet.prob).slice(0, 6);
       
-      console.log('&#x1F4B0; Trader picks:', 
-        `Raddoppio: ${state.traderPicks.raddoppio.length}`,
-        `Singole: ${state.traderPicks.singole.length}`);
+      // PATCH V11: console.log Trader picks rimosso (rumore in console).
     }
 
     // === MONEY MANAGEMENT ===
@@ -12527,54 +12531,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
             return '<div style="margin-bottom:16px;"><button onclick="toggleAmicoPicks()" style="width:100%;padding:14px 16px;background:linear-gradient(135deg,rgba(251,191,36,0.08),rgba(245,158,11,0.04));border:1.5px solid rgba(251,191,36,0.25);border-radius:12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;"><div style="display:flex;align-items:center;gap:10px;"><span style="font-size:1.3rem;">🎯</span><div style="text-align:left;"><div style="font-size:0.85rem;font-weight:900;color:#fbbf24;">Analizzate dall\'Amico</div><div style="font-size:0.6rem;color:var(--text-dark);">' + ap.length + ' picks · ' + goldN + ' ORO ' + (ap.length - goldN) + ' altri</div></div></div><span style="font-size:1.2rem;color:var(--text-dark);">▾</span></button><div id="amicoPicksContainer" style="display:none;margin-top:8px;">' + renderAmicoPicks() + '</div></div>';
           } catch(e) { console.warn('Amico error:', e); return ''; }
         })()}
-        <div class="panel" style="margin-bottom:16px;">
-          <div class="panel-title" style="margin-bottom:12px;">&#x1F50D; Trova i Migliori Pick</div>
-          <div style="display:flex;gap:7px;flex-wrap:wrap;${qf ? 'margin-bottom:14px;' : ''}">
-            ${filters.map(f => `
-              <button onclick="state.quickFind=state.quickFind==='${f.key}'?null:'${f.key}';render();"
-                style="padding:7px 13px;border-radius:20px;border:1.5px solid ${f.color};
-                       background:${qf===f.key?f.color:'transparent'};color:${qf===f.key?'#0a0f1e':f.color};
-                       font-size:0.76rem;font-weight:700;cursor:pointer;white-space:nowrap;">
-                ${f.label}
-              </button>
-            `).join('')}
-          </div>
-          ${qf && af ? `
-            <div style="border-top:1px solid var(--border);padding-top:12px;">
-              ${results.length === 0 ? `
-                <div style="text-align:center;padding:16px;color:var(--text-gray);font-size:0.85rem;">Nessun pick trovato. Carica le partite del giorno.</div>
-              ` : `
-                <div style="font-size:0.71rem;color:var(--text-dark);margin-bottom:10px;">
-                  Top ${results.length} per <strong style="color:${af.color}">${af.label}</strong> &bull; ordinati per probabilit&agrave;
-                  ${(() => { try { var ok=0,ko=0; results.forEach(function(r){var c=checkPickResult(r.matchId,r.pick);if(c){if(c.won)ok++;else ko++;}}); return ok+ko>0?' &bull; <span style="color:#10b981;">'+ok+'✅</span> <span style="color:#ef4444;">'+ko+'❌</span>':''; } catch(e){return '';} })()}
-                </div>
-                <div style="display:flex;flex-direction:column;gap:6px;">
-                  ${results.map((a,i) => `
-                    <div onclick="{ const m=state.matches.find(x=>x.id===${a.matchId}); if(m)analyzeMatch(m); }"
-                         style="background:var(--bg-card);border:1px solid ${i===0?af.color:'var(--border)'};border-radius:10px;
-                                padding:10px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:10px;
-                                ${i===0?'box-shadow:0 0 10px '+af.color+'20;':''}">
-                      <div style="min-width:0;flex:1;">
-                        <div style="font-size:0.6rem;color:var(--text-dark);margin-bottom:2px;">${esc(a.league)} &bull; ${a.time} ${renderPickResultBadge(a.matchId, a.pick)} ${renderDataQualityBadge(a.dataQuality)}</div>
-                        <div style="font-size:0.82rem;font-weight:700;color:var(--text-white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                          ${esc(a.homeName)} vs ${esc(a.awayName)}
-                        </div>
-                        <div style="font-size:0.7rem;color:${af.color};font-weight:600;margin-top:2px;">${esc(a.pick)}</div>
-                      </div>
-                      <div style="text-align:right;flex-shrink:0;">
-                        <div style="font-size:1.25rem;font-weight:800;color:${a.prob>=75?'#00e5a0':a.prob>=60?'#fbbf24':'var(--text-gray)'};">
-                          ${typeof a.prob==='number'?a.prob.toFixed(0):a.prob}%
-                        </div>
-                        <div style="font-size:0.58rem;color:var(--text-dark);">${a.confidence==='high'?'&#x1F7E2; Alta':a.confidence==='medium'?'&#x1F7E1; Media':'&#x26AA; Bassa'}</div>
-                        ${i===0?'<div style="font-size:0.55rem;color:#f59e0b;font-weight:700;">&#x2B50; TOP</div>':''}
-                      </div>
-                    </div>
-                  `).join('')}
-                </div>
-              `}
-            </div>
-          ` : ''}
-        </div>
+        <!-- PATCH V11: Sezione "Trova i Migliori Pick" rimossa su richiesta utente. -->
       `;
     }
     
@@ -14171,6 +14128,202 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       // Global AI penalty/bonus
       const aiGlobalMult = aiRecommendation === 'SKIP' ? 0.85 : aiRecommendation === 'GIOCA' ? 1.05 : 1.0;
 
+      // ════════════════════════════════════════════════════════════════════
+      // PATCH V11: GIUDIZIO ARMONICO — pre-calcolo dei 7 moduli laterali
+      // I dati sono calcolati UNA VOLTA qui, poi scoreMarket li usa
+      // ════════════════════════════════════════════════════════════════════
+
+      // --- Trap Detector (globale: rischi situazionali della partita) ---
+      let trapData_v11 = null;
+      try {
+        if (typeof calculateTrapScore === 'function') {
+          trapData_v11 = calculateTrapScore(match, analysis);
+        }
+      } catch(e) { console.warn('V11 Trap pre-calc fail:', e); }
+
+      // --- Reverse xG Protocol (globale: confronto Poisson inverso) ---
+      let reverseXgData_v11 = null;
+      try {
+        if (bk && bk.homeOdd && typeof calculateReverseXG === 'function') {
+          reverseXgData_v11 = calculateReverseXG(bk, homeXG, awayXG);
+        }
+      } catch(e) { console.warn('V11 ReverseXG pre-calc fail:', e); }
+
+      // --- Presagio (globale: pre-analisi con 5 metriche + 6 predizioni) ---
+      let presagioData_v11 = null;
+      try {
+        if (typeof window !== 'undefined' && window.Presagio && typeof window.Presagio.calculate === 'function') {
+          presagioData_v11 = window.Presagio.calculate(analysis, match);
+        }
+      } catch(e) { console.warn('V11 Presagio pre-calc fail:', e); }
+
+      // --- Regression Score (globale: grade qualita' predizione) ---
+      const regressionData_v11 = state.regressionScore || null;
+
+      // --- Consensus Engine (globale: voto pesato dei moduli) ---
+      const consensusData_v11 = state.consensus || null;
+
+      // --- Gap Analyzer (globale: True Spread basato su differenziale xG) ---
+      const gapValue_v11 = homeXG - awayXG;
+      const gapMagnitude_v11 = Math.abs(gapValue_v11);
+      const gapFavorsHome_v11 = gapValue_v11 > 0;
+
+      // Helper: estrae bonus Reverse Quote per il pick specifico
+      // (riusa logica di V10 ma in versione inline per evitare dipendenze)
+      function getRevQuoteBonus_v11(pickValue, modelProb) {
+        if (!oddsLab || !oddsLab.bookmakers || oddsLab.bookmakers.length === 0) return 1.0;
+        const v = (pickValue || '').toLowerCase();
+        // Solo OU 2.5 e GG/NG sono valutabili (le quote 1X2 le vediamo via gap+bk)
+        if (!/over 2\.5|under 2\.5|^gg|^ng/i.test(v)) return 1.0;
+        let avgO=0, avgU=0, avgGG=0, avgNG=0, countO=0, countG=0;
+        oddsLab.bookmakers.forEach(function(bm) {
+          if (bm.ou25 && bm.ou25.over > 1 && bm.ou25.under > 1) { avgO+=bm.ou25.over; avgU+=bm.ou25.under; countO++; }
+          if (bm.btts && bm.btts.yes > 1 && bm.btts.no > 1) { avgGG+=bm.btts.yes; avgNG+=bm.btts.no; countG++; }
+        });
+        if (countO > 0) { avgO/=countO; avgU/=countO; }
+        if (countG > 0) { avgGG/=countG; avgNG/=countG; }
+        let bookProb = null;
+        if (/over 2\.5/i.test(v) && countO > 0) {
+          const tot = 1/avgO + 1/avgU; bookProb = (1/avgO/tot) * 100;
+        } else if (/under 2\.5/i.test(v) && countO > 0) {
+          const tot = 1/avgO + 1/avgU; bookProb = (1/avgU/tot) * 100;
+        } else if (/^gg/i.test(v) && countG > 0) {
+          const tot = 1/avgGG + 1/avgNG; bookProb = (1/avgGG/tot) * 100;
+        } else if (/^ng/i.test(v) && countG > 0) {
+          const tot = 1/avgGG + 1/avgNG; bookProb = (1/avgNG/tot) * 100;
+        }
+        if (bookProb == null) return 1.0;
+        const delta = modelProb - bookProb;
+        // Modello molto piu' bullish del mercato → conferma valore (bonus 1.08)
+        // Modello molto piu' bearish → contraddice mercato (penalty 0.90)
+        // Allineato → neutro
+        if (delta > 8) return 1.08;
+        if (delta > 3) return 1.03;
+        if (delta < -8) return 0.90;
+        if (delta < -3) return 0.96;
+        return 1.0;
+      }
+
+      // Helper: estrae bonus Presagio confrontando il pick con la predizione Presagio sullo stesso mercato
+      function getPresagioBonus_v11(pickValue) {
+        if (!presagioData_v11 || !presagioData_v11.predictions) return { bonus: 1.0, agrees: null };
+        const v = (pickValue || '').toLowerCase();
+        const preds = presagioData_v11.predictions;
+        let psgPick = null, psgProb = null;
+        if (/over 2\.5|under 2\.5/i.test(v) && preds.overUnder) {
+          psgPick = (preds.overUnder.value || '').toLowerCase();
+          psgProb = preds.overUnder.prob;
+        } else if (/^gg|^ng/i.test(v) && preds.ggng) {
+          psgPick = (preds.ggng.value || '').toLowerCase();
+          psgProb = preds.ggng.prob;
+        } else if (/^1 \(|^2 \(|^x \(|^1$|^x$|^2$/.test(v) && preds.segnoSecco) {
+          psgPick = (preds.segnoSecco.value || '').toLowerCase();
+          psgProb = preds.segnoSecco.prob;
+        } else if (/^1x|^x2|^12/i.test(v) && preds.doppiaChance) {
+          psgPick = (preds.doppiaChance.value || '').toLowerCase();
+          psgProb = preds.doppiaChance.prob;
+        } else {
+          return { bonus: 1.0, agrees: null };
+        }
+        if (!psgPick) return { bonus: 1.0, agrees: null };
+        const agrees = v.indexOf(psgPick) >= 0 || psgPick.indexOf(v.replace(/\s*\(.*?\)\s*/g, '').trim()) >= 0;
+        if (agrees && psgProb >= 60) return { bonus: 1.10, agrees: true };
+        if (agrees && psgProb >= 50) return { bonus: 1.05, agrees: true };
+        if (!agrees && psgProb >= 55) return { bonus: 0.92, agrees: false };
+        return { bonus: 1.0, agrees: null };
+      }
+
+      // Helper: bonus dal Trap Detector — globale per tutti i mercati 1X2
+      function getTrapBonus_v11(pickValue) {
+        if (!trapData_v11 || typeof trapData_v11.score !== 'number') return 1.0;
+        const v = (pickValue || '').toLowerCase();
+        const is1X2 = /^1\b|^2\b|^x\b|^1x|^x2|^12/i.test(v) && !/over|under|^gg|^ng/i.test(v);
+        // Il Trap Detector e' nato per 1X2; per OU/GG ha effetto attenuato
+        const factor = is1X2 ? 1.0 : 0.4;
+        const score = trapData_v11.score;
+        if (score >= 70) return 1.0 - 0.15 * factor; // penalty forte
+        if (score >= 55) return 1.0 - 0.08 * factor;
+        if (score >= 40) return 1.0 - 0.04 * factor;
+        if (score <= 20) return 1.0 + 0.05 * factor; // safe → bonus
+        return 1.0;
+      }
+
+      // Helper: bonus Reverse xG — solo per 1X2
+      function getReverseXgBonus_v11(pickValue) {
+        if (!reverseXgData_v11) return 1.0;
+        const v = (pickValue || '').toLowerCase();
+        const ts = reverseXgData_v11.trapStatus;
+        // "trappola" = bookmaker sopravvaluta favorito → penalty se gioco favorito
+        // "valore" = bookmaker sottovaluta squadra → bonus se gioco quella squadra
+        const homeD = parseFloat(reverseXgData_v11.homeDelta);
+        const awayD = parseFloat(reverseXgData_v11.awayDelta);
+        if (/^1 \(|^1$|^1x|^12/i.test(v) && !/^x/.test(v)) {
+          // Pick pro-casa
+          if (ts === 'trappola' && homeD < -0.3) return 0.88;
+          if (homeD > 0.35) return 1.08;
+        } else if (/^2 \(|^2$|^x2|^12/i.test(v) && !/^x/.test(v)) {
+          // Pick pro-ospite
+          if (ts === 'trappola' && awayD < -0.3) return 0.88;
+          if (awayD > 0.35) return 1.08;
+        }
+        return 1.0;
+      }
+
+      // Helper: bonus Regression Score — globale, scalato sul grade
+      function getRegressionBonus_v11() {
+        if (!regressionData_v11 || !regressionData_v11.grade) return 1.0;
+        const g = regressionData_v11.grade.toUpperCase();
+        if (g === 'A+') return 1.10;
+        if (g === 'A')  return 1.05;
+        if (g === 'B')  return 1.00;
+        if (g === 'C')  return 0.95;
+        if (g === 'D')  return 0.88;
+        return 1.0;
+      }
+
+      // Helper: bonus Consensus — se il pick attuale corrisponde al consensus pick
+      function getConsensusBonus_v11(pickValue) {
+        if (!consensusData_v11 || !consensusData_v11.pick) return { bonus: 1.0, agrees: null };
+        const cPick = (consensusData_v11.pick || '').toLowerCase();
+        const v = (pickValue || '').toLowerCase().replace(/\s*\(.*?\)\s*/g, '').trim();
+        const agrees = v === cPick || v.indexOf(cPick) === 0 || cPick.indexOf(v) === 0;
+        if (!agrees) return { bonus: 1.0, agrees: false };
+        const agreement = parseFloat(consensusData_v11.agreement) || 0;
+        if (agreement >= 80) return { bonus: 1.12, agrees: true };
+        if (agreement >= 60) return { bonus: 1.07, agrees: true };
+        if (agreement >= 40) return { bonus: 1.03, agrees: true };
+        return { bonus: 1.0, agrees: true };
+      }
+
+      // Helper: bonus Gap Analyzer — bonus se gap forte e pick favorisce la stessa squadra
+      function getGapBonus_v11(pickValue) {
+        const v = (pickValue || '').toLowerCase();
+        if (gapMagnitude_v11 < 0.4) return 1.0; // gap troppo piccolo
+        if (/over 2\.5/i.test(v)) {
+          // xG totale alto + gap presente = piu' probabile Over
+          return totXG >= 2.5 ? 1.04 : 1.0;
+        }
+        if (/under 2\.5/i.test(v)) {
+          return totXG < 2.0 ? 1.04 : 1.0;
+        }
+        // Pick 1X2
+        const pickFavorsHome = /^1\b|^1\s|^1\(|^1x|^12/i.test(v) && !/^x/.test(v);
+        const pickFavorsAway = /^2\b|^2\s|^2\(|^x2|^12/i.test(v) && !/^x/.test(v);
+        if (pickFavorsHome && gapFavorsHome_v11) {
+          return gapMagnitude_v11 > 1.0 ? 1.10 : gapMagnitude_v11 > 0.75 ? 1.06 : 1.03;
+        }
+        if (pickFavorsAway && !gapFavorsHome_v11) {
+          return gapMagnitude_v11 > 1.0 ? 1.10 : gapMagnitude_v11 > 0.75 ? 1.06 : 1.03;
+        }
+        // Pick contro il gap (es. gioco 1 ma gap favorisce ospite)
+        if ((pickFavorsHome && !gapFavorsHome_v11) || (pickFavorsAway && gapFavorsHome_v11)) {
+          return gapMagnitude_v11 > 1.0 ? 0.90 : 0.95;
+        }
+        // Pareggio in caso di gap basso
+        if (/^x\b|^x$|^x\s/.test(v) && gapMagnitude_v11 < 0.3) return 1.05;
+        return 1.0;
+      }
+
       const markets = [];
 
       function scoreMarket(opts) {
@@ -14219,7 +14372,40 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           aiBonus *= aiGlobalMult;
         }
 
-        const rawScore = (prob / 100) * Math.pow(convergence, 0.7) * (0.4 + 0.6 * mlW) * ctx * superBonus * aiBonus;
+        // ════════════════════════════════════════════════════════════════
+        // PATCH V11: APPLICA I 7 MOLTIPLICATORI DEI MODULI LATERALI
+        // Ogni modulo restituisce un numero (tipicamente tra 0.85 e 1.15)
+        // ════════════════════════════════════════════════════════════════
+        const trapBonus_v11        = getTrapBonus_v11(value);
+        const revQuoteBonus_v11    = getRevQuoteBonus_v11(value, prob);
+        const revXgBonus_v11       = getReverseXgBonus_v11(value);
+        const presagioResult_v11   = getPresagioBonus_v11(value);
+        const presagioBonus_v11    = presagioResult_v11.bonus;
+        const regressionBonus_v11  = getRegressionBonus_v11();
+        const consensusResult_v11  = getConsensusBonus_v11(value);
+        const consensusBonus_v11   = consensusResult_v11.bonus;
+        const gapBonus_v11         = getGapBonus_v11(value);
+
+        // Conta i moduli che supportano (>1.02), contraddicono (<0.98), o sono neutri
+        const moduleVotes_v11 = [
+          { name: 'Trap Det.',    bonus: trapBonus_v11 },
+          { name: 'Rev Quote',    bonus: revQuoteBonus_v11 },
+          { name: 'Rev xG',       bonus: revXgBonus_v11 },
+          { name: 'Presagio',     bonus: presagioBonus_v11 },
+          { name: 'Regression',   bonus: regressionBonus_v11 },
+          { name: 'Consensus',    bonus: consensusBonus_v11 },
+          { name: 'Gap',          bonus: gapBonus_v11 },
+          { name: 'Super Algo',   bonus: superBonus },
+          { name: 'Oracle AI',    bonus: aiBonus }
+        ];
+        const supportingModules_v11 = moduleVotes_v11.filter(m => m.bonus > 1.02);
+        const contradictingModules_v11 = moduleVotes_v11.filter(m => m.bonus < 0.98);
+        const neutralModules_v11 = moduleVotes_v11.filter(m => m.bonus >= 0.98 && m.bonus <= 1.02);
+
+        const rawScore = (prob / 100) * Math.pow(convergence, 0.7) * (0.4 + 0.6 * mlW) * ctx
+                        * superBonus * aiBonus
+                        * trapBonus_v11 * revQuoteBonus_v11 * revXgBonus_v11
+                        * presagioBonus_v11 * regressionBonus_v11 * consensusBonus_v11 * gapBonus_v11;
         const superScore = rawScore * 100;
 
         let confidence;
@@ -14228,12 +14414,35 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         else confidence = 'low';
         // Upgrade se TUTTI concordano
         if (confidence === 'mid' && superBonus >= 1.10 && aiBonus >= 1.10) confidence = 'high';
+        // PATCH V11: upgrade se almeno 5 moduli su 9 supportano
+        if (confidence === 'mid' && supportingModules_v11.length >= 5 && contradictingModules_v11.length === 0) confidence = 'high';
+        // PATCH V11: downgrade se 3+ moduli contraddicono
+        if (confidence === 'high' && contradictingModules_v11.length >= 3) confidence = 'mid';
+        if (confidence === 'mid' && contradictingModules_v11.length >= 4) confidence = 'low';
 
-        return { value, icon, prob, convergence, superScore, confidence, 
+        return { value, icon, prob, convergence, superScore, confidence,
                  mlAccuracy: (mlW*100).toFixed(0), signalHits: signals.filter(Boolean).length, signalTotal: signals.length,
                  superAlgoScore: sScore.toFixed(1), superAlgoConf: sConf || '-',
                  aiMatch: aiBonus > 1.05 ? 'bestPick' : aiBonus > 1.02 ? 'top3' : '-',
-                 superBonus: superBonus.toFixed(2), aiBonus: aiBonus.toFixed(2) };
+                 superBonus: superBonus.toFixed(2), aiBonus: aiBonus.toFixed(2),
+                 // PATCH V11: metadati nuovi moduli per "Coro dei moduli"
+                 v11: {
+                   trapBonus: trapBonus_v11.toFixed(2),
+                   revQuoteBonus: revQuoteBonus_v11.toFixed(2),
+                   revXgBonus: revXgBonus_v11.toFixed(2),
+                   presagioBonus: presagioBonus_v11.toFixed(2),
+                   presagioAgrees: presagioResult_v11.agrees,
+                   regressionBonus: regressionBonus_v11.toFixed(2),
+                   consensusBonus: consensusBonus_v11.toFixed(2),
+                   consensusAgrees: consensusResult_v11.agrees,
+                   gapBonus: gapBonus_v11.toFixed(2),
+                   supporting: supportingModules_v11.length,
+                   contradicting: contradictingModules_v11.length,
+                   neutral: neutralModules_v11.length,
+                   totalModules: moduleVotes_v11.length,
+                   modulesList: moduleVotes_v11
+                 }
+               };
       }
 
       // Build all markets (same signals as before)
@@ -14347,7 +14556,17 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         fatigueHome: analysis.homeFatigue || 1.0, fatigueAway: analysis.awayFatigue || 1.0,
         quality: analysis.quality || 'base', dixonColes: true,
         signalsAnalyzed: markets.reduce((s,m) => s + m.signalTotal, 0),
-        hasSuperAlgo, hasSuperAI
+        hasSuperAlgo, hasSuperAI,
+        // PATCH V11: flag presenza moduli laterali
+        v11_modulesActive: {
+          trap: !!trapData_v11,
+          reverseXg: !!reverseXgData_v11,
+          presagio: !!presagioData_v11,
+          regression: !!regressionData_v11,
+          consensus: !!consensusData_v11,
+          gap: true,
+          revQuote: !!(oddsLab && oddsLab.bookmakers && oddsLab.bookmakers.length > 0)
+        }
       };
 
       return { topMarkets: markets.slice(0, 10), topExact, meta, aiVerdict, computedAt: Date.now(), hasSuperAlgo, hasSuperAI };
@@ -14425,6 +14644,57 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           (giudizio.hasSuperAI ? '<span style="font-size:0.68rem;background:rgba(168,85,247,0.08);color:#c084fc;padding:4px 10px;border-radius:8px;border:1px solid rgba(168,85,247,0.2);">\u2705 Oracle AI boost applicato</span>' : '') +
           '</div>'
         ) : '') +
+
+        // PATCH V11: CORO DEI MODULI
+        // Mostra quali moduli supportano il TOP pick e quali lo contraddicono
+        (giudizio.topMarkets[0] && giudizio.topMarkets[0].v11 ? (function() {
+          const top = giudizio.topMarkets[0];
+          const v11 = top.v11;
+          const mods = v11.modulesList || [];
+          const sup = mods.filter(m => m.bonus > 1.02);
+          const con = mods.filter(m => m.bonus < 0.98);
+          const neu = mods.filter(m => m.bonus >= 0.98 && m.bonus <= 1.02);
+          const totalActive = mods.length;
+          const supN = sup.length;
+          const harmonyScore = Math.round((supN / totalActive) * 100);
+          const harmonyColor = harmonyScore >= 70 ? '#00e5a0' : harmonyScore >= 45 ? '#fbbf24' : '#f87171';
+          const harmonyLabel = harmonyScore >= 70 ? 'ARMONIA ALTA' : harmonyScore >= 45 ? 'ARMONIA MEDIA' : 'DISACCORDO';
+
+          return '<div class="gf-section" style="background:linear-gradient(135deg,rgba(0,212,255,0.04),rgba(168,85,247,0.04));border:1px solid rgba(0,212,255,0.18);border-radius:14px;padding:16px;margin-bottom:14px;">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">' +
+              '<div>' +
+                '<div style="font-size:0.72rem;color:#00d4ff;font-weight:800;letter-spacing:0.5px;text-transform:uppercase;">\u{1F3B5} Coro dei Moduli</div>' +
+                '<div style="font-size:0.62rem;color:var(--text-dark);margin-top:2px;">Quali moduli concordano sul top pick "' + esc(top.value) + '"</div>' +
+              '</div>' +
+              '<div style="text-align:right;">' +
+                '<div style="font-size:1.4rem;font-weight:900;color:' + harmonyColor + ';line-height:1;">' + supN + '/' + totalActive + '</div>' +
+                '<div style="font-size:0.55rem;color:' + harmonyColor + ';font-weight:700;letter-spacing:0.4px;">' + harmonyLabel + '</div>' +
+              '</div>' +
+            '</div>' +
+            // Bar visualization
+            '<div style="display:flex;height:8px;background:rgba(255,255,255,0.04);border-radius:6px;overflow:hidden;margin-bottom:12px;">' +
+              '<div style="width:' + (supN/totalActive*100) + '%;background:#00e5a0;"></div>' +
+              '<div style="width:' + (neu.length/totalActive*100) + '%;background:#64748b;opacity:0.5;"></div>' +
+              '<div style="width:' + (con.length/totalActive*100) + '%;background:#f87171;"></div>' +
+            '</div>' +
+            // Modules list as pills
+            '<div style="display:flex;flex-wrap:wrap;gap:5px;">' +
+              mods.map(function(m) {
+                const positive = m.bonus > 1.02;
+                const negative = m.bonus < 0.98;
+                const c = positive ? '#00e5a0' : negative ? '#f87171' : '#64748b';
+                const bg = positive ? 'rgba(0,229,160,0.08)' : negative ? 'rgba(248,113,113,0.08)' : 'rgba(100,116,139,0.06)';
+                const icon = positive ? '\u2705' : negative ? '\u274C' : '\u2796';
+                const deltaTxt = m.bonus > 1.0 ? '+' + ((m.bonus - 1) * 100).toFixed(0) + '%' : ((m.bonus - 1) * 100).toFixed(0) + '%';
+                return '<span style="font-size:0.62rem;background:' + bg + ';color:' + c + ';padding:4px 8px;border-radius:6px;border:1px solid ' + c + '30;font-weight:600;">' +
+                  icon + ' ' + m.name + ' <span style="opacity:0.7;">' + deltaTxt + '</span>' +
+                '</span>';
+              }).join('') +
+            '</div>' +
+            (con.length >= 3 ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;font-size:0.62rem;color:#f87171;">\u26A0\uFE0F ' + con.length + ' moduli contraddicono il top pick. Valuta con cautela o considera un\'alternativa dalla lista sotto.</div>' : '') +
+            (supN >= 6 && con.length === 0 ? '<div style="margin-top:10px;padding:8px 10px;background:rgba(0,229,160,0.06);border:1px solid rgba(0,229,160,0.2);border-radius:8px;font-size:0.62rem;color:#00e5a0;">\u2728 Convergenza forte: ' + supN + ' moduli su ' + totalActive + ' supportano. Pick di alto consenso.</div>' : '') +
+          '</div>';
+        })() : '') +
 
         // TOP MERCATI
         '<div class="gf-section">\n' +

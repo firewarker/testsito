@@ -450,14 +450,10 @@
     html += renderSingleSlider('TENDENZA OVER / UNDER',  p.metrics.tendenza);
 
     // ===== AZIONE / RISULTATI =====
-    if (!revealed) {
-      html += '<button class="psg-analyze" onclick="presagioReveal(' + matchId + ')">';
-      html +=   '<span class="psg-analyze-icon">▶</span>';
-      html +=   '<span>ANALIZZA</span>';
-      html += '</button>';
-    } else {
-      html += renderResults(p, matchId);
-    }
+    // PATCH V11: rimosso il bottone "ANALIZZA". I risultati compaiono automaticamente
+    // con il fade-in del CSS (.psg-results { animation: psg-fade-in 0.4s ease-out }).
+    // La funzione presagioReveal() resta esposta su window per backward compat.
+    html += renderResults(p, matchId);
 
     html += '</div>';
     return html;
