@@ -1,38 +1,35 @@
 // ===================================================
-    // BETTINGPRO v11.3 - MATRICE DI COMPATIBILITÀ MERCATI
+    // BETTINGPRO v12 - CLEANUP HOME + RISTRUTTURAZIONE FASE 1
     // ===================================================
-    // V11.3 PATCH (rispetto a V11.2):
-    //   FIX LOGICI (i moduli che prima dicevano il falso):
-    //   • getPresagioBonus_v11 RISCRITTA: ora copre tutte le linee Over/Under
-    //     (1.5, 2.5, 3.5), Multigol, GG/NG, 1X2 e Doppia Chance.
-    //     Prima la regex catturava solo "over 2.5 | under 2.5" e ignorava
-    //     le altre linee → Presagio risultava "0% neutro" anche quando in
-    //     realta' diceva esattamente la stessa cosa del pick.
-    //   • Logica di INCLUSIONE/COMPATIBILITÀ tra mercati:
-    //     - "Under 2.5" e "Under 3.5" non sono in conflitto. Under 2.5 ⊂
-    //       Under 3.5 (se vince il primo vince anche il secondo). Il modulo
-    //       che dice "Under 3.5" ora SUPPORTA un pick "Under 2.5", non lo
-    //       contraddice.
-    //     - Stesso per Over (Over 2.5 ⊂ Over 1.5).
-    //     - "Over X" + "Under Y" sono COMPATIBILI quando Y > X (es. Over 1.5
-    //       + Under 3.5: gol={2,3} → entrambi possono vincere). Sono in
-    //       CONFLITTO solo quando Y <= X (es. Over 2.5 + Under 2.5).
-    //   • getRevQuoteBonus_v11 estesa con la stessa matrice OU. Funziona
-    //     solo per linea 2.5 e GG/NG perche' i bookie sharp non quotano
-    //     affidabilmente le altre linee.
-    //   • Bug parsing 1X2/Doppia Chance corretto: ora distingue "1 (Casa)"
-    //     da "1X (Casa o Pari)" correttamente.
+    // V12 PATCH (rispetto a V11.3):
+    //   FIX BUG CRITICO:
+    //   • Cache Hero Verdetto e openGiudizioFinale ora usano un FINGERPRINT
+    //     dei dati di input (superAnalysis + superAIAnalysis). Prima si
+    //     basavano solo sul tempo (15 min TTL), per cui dopo "Analizza con
+    //     SuperAI" il Coro dei Moduli si aggiornava ma il Verdetto in alto
+    //     restava bloccato sui vecchi numeri.
     //
-    //   FIX UI:
-    //   • Rimosso bottone duplicato "Vedi tutti i 10 pronostici" dall'Hero
-    //     Verdetto. Era doppione del bottone "Giudizio Finale" nell'header
-    //     della pagina partita.
+    //   HOME:
+    //   • Rimosso "Colpo del Giorno" su richiesta utente.
+    //   • Aggiunte FASCE ORARIE come filtro: 🌅 Mattino (9-13), ☀️ Pomeriggio
+    //     (13-17), 🌆 Sera (17-21), 🌙 Tarda (21-24). Ogni fascia mostra il
+    //     numero di partite incluse. Filtra le leghe a quelle con almeno una
+    //     partita nella fascia.
     //
-    //   Helper aggiunti (riusabili anche in V12+):
-    //   • parseOULine(s) → {direction, line}
-    //   • ouRelation(a, b) → match/support-strong/support-weak/compatible/conflict
-    //   • parseMultigolRange(s) → {min, max}
-    //   • multigolRelation(a, b) → match/subset/superset/overlap/disjoint
+    //   PAGINA PARTITA:
+    //   • 4 accordion ora chiuse di default (Presagio, Trap Detector,
+    //     Consensus Engine, Regression Score). Restano aperte solo le 2
+    //     core: "Pronostici AI & Statistico" e "Probabilita' Mercati Principali".
+    //   • Aggiunti 3 divider raggruppanti che spezzano visivamente la pagina
+    //     in blocchi semantici:
+    //       - 📊 Predizioni & Analisi (cyan)
+    //       - 💰 Mercato & Quote (amber)
+    //       - 🔍 Dati & Approfondimenti (purple)
+    //
+    //   RESTA DA FARE (turni successivi):
+    //   • Multigol come pronostico classificato nel Giudizio Finale
+    //   • Sezione "Crea Multipla" auto-generata
+    //   • Refactoring del codice in file separati (engine-poisson.js, ecc.)
     // ===================================================
     
     // ============================================
@@ -725,6 +722,7 @@
       dailyPicks: { raddoppi: [], gg: [], over25: [], pareggi: [], over1T: [], vittorieCasa: [], vittorieOspite: [], matchAdvices: [] },
       quickFind: null, // 'home1'|'away2'|'gg'|'over25'|'over15'|'under25'
       leagueFilter: 'all', // 'all'|'favorites'|'top5'|'italia'|'inghilterra'|'spagna'|'germania'|'francia'
+      timeSlotFilter: 'all', // PATCH V12: 'all'|'morning'|'afternoon'|'evening'|'night'
       favoriteLeagues: JSON.parse(localStorage.getItem('bp2_fav_leagues') || '[]'),
       schedinaModal: false,
       // Money Management - Sistema Obiettivo
@@ -12157,6 +12155,15 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         leagueNames: ['Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1']
       }
     };
+
+    // PATCH V12: fasce orarie per filtrare le partite per ora di inizio.
+    // Esposto su window per essere accessibile da getFilteredLeagues.
+    window.TIME_SLOTS = {
+      'morning':   { label: '🌅 Mattino',   range: '09:00-13:00', from: 9,  to: 13 },
+      'afternoon': { label: '☀️ Pomeriggio', range: '13:00-17:00', from: 13, to: 17 },
+      'evening':   { label: '🌆 Sera',      range: '17:00-21:00', from: 17, to: 21 },
+      'night':     { label: '🌙 Tarda',     range: '21:00-24:00', from: 21, to: 24 }
+    };
     
     // Bandiere per tutte le nazioni — usate per generare bottoni dinamici
     const COUNTRY_FLAGS = {
@@ -12202,6 +12209,13 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       state.leagueFilter = filter;
       render();
     }
+
+    // PATCH V12: setter per fasce orarie. Espone su window per onclick.
+    function setTimeSlot(slot) {
+      state.timeSlotFilter = slot || 'all';
+      render();
+    }
+    window.setTimeSlot = setTimeSlot;
     
     function selectLeague(leagueId) {
       state.selectedLeague = state.leagues.find(l => l.id === leagueId);
@@ -12230,6 +12244,24 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         filtered = filtered.filter(l => l.country === countryName);
       }
       // else 'all' → nessun filtro
+
+      // PATCH V12: filtro per fascia oraria.
+      // I bucket sono quelli definiti in TIME_SLOTS. Una lega rimane visibile
+      // solo se ha almeno una partita che cade nella fascia.
+      const tsKey = state.timeSlotFilter || 'all';
+      if (tsKey !== 'all' && window.TIME_SLOTS && window.TIME_SLOTS[tsKey]) {
+        const slot = window.TIME_SLOTS[tsKey];
+        const leagueHasMatchInSlot = {};
+        (state.matches || []).forEach(function(m) {
+          if (!m.timestamp) return;
+          const h = new Date(m.timestamp * 1000).getHours();
+          if (h >= slot.from && h < slot.to) {
+            const lid = m.league && m.league.id;
+            if (lid) leagueHasMatchInSlot[lid] = true;
+          }
+        });
+        filtered = filtered.filter(l => leagueHasMatchInSlot[l.id]);
+      }
       
       // Ordina: preferiti in cima, poi alfabetico
       return filtered.sort((a, b) => {
@@ -12323,6 +12355,36 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
               ">${f.label}</button>
             `).join('')}
           </div>
+
+          <!-- PATCH V12: FASCE ORARIE -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding-top:6px;border-top:1px solid var(--border);">
+            <span style="font-size:0.62rem;color:var(--text-dark);align-self:center;letter-spacing:0.5px;text-transform:uppercase;font-weight:700;">Orario:</span>
+            <button onclick="setTimeSlot('all')" style="
+              padding:5px 11px;border-radius:18px;font-size:0.7rem;font-weight:700;cursor:pointer;
+              border:1.5px solid ${(state.timeSlotFilter || 'all') === 'all' ? 'var(--accent-cyan)' : 'var(--border)'};
+              background:${(state.timeSlotFilter || 'all') === 'all' ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)'};
+              color:${(state.timeSlotFilter || 'all') === 'all' ? 'var(--accent-cyan)' : 'var(--text-gray)'};
+              transition:all 0.2s;
+            ">🕐 Tutte</button>
+            ${Object.keys(window.TIME_SLOTS).map(function(key) {
+              const slot = window.TIME_SLOTS[key];
+              const active = state.timeSlotFilter === key;
+              // count partite in questa fascia
+              let count = 0;
+              (state.matches || []).forEach(function(m) {
+                if (!m.timestamp) return;
+                const h = new Date(m.timestamp * 1000).getHours();
+                if (h >= slot.from && h < slot.to) count++;
+              });
+              return '<button onclick="setTimeSlot(\'' + key + '\')" title="' + slot.range + '" style="' +
+                'padding:5px 11px;border-radius:18px;font-size:0.7rem;font-weight:700;cursor:pointer;' +
+                'border:1.5px solid ' + (active ? 'var(--accent-cyan)' : 'var(--border)') + ';' +
+                'background:' + (active ? 'rgba(0,212,255,0.12)' : 'var(--bg-input)') + ';' +
+                'color:' + (active ? 'var(--accent-cyan)' : 'var(--text-gray)') + ';' +
+                'transition:all 0.2s;white-space:nowrap;' +
+                '">' + slot.label + ' <span style="opacity:0.7;font-size:0.62rem;">(' + count + ')</span></button>';
+            }).join('')}
+          </div>
           
           ${filtered.length === 0 ? `
             <div style="text-align:center;padding:20px;color:var(--text-dark);">
@@ -12351,8 +12413,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           `}
         </div>
         
-        <!-- COLPO DEL GIORNO -->
-        ${renderColpoDelGiorno(picks)}
+        <!-- PATCH V12: rimosso "Colpo del Giorno" su richiesta utente. -->
 
         <!-- STATS BAR -->
         <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
@@ -12851,6 +12912,12 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>`;
         })()}
 
+        <!-- PATCH V12: SECTION GROUP HEADER -->
+        <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid var(--accent-cyan);background:linear-gradient(90deg,rgba(0,212,255,0.06),transparent);border-radius:4px;">
+          <div style="font-size:0.72rem;font-weight:900;letter-spacing:1.5px;color:var(--accent-cyan);text-transform:uppercase;">📊 Predizioni &amp; Analisi</div>
+          <div style="font-size:0.6rem;color:var(--text-dark);margin-top:2px;">Cosa dicono i modelli predittivi e di rischio</div>
+        </div>
+
         <!-- TABS PRONOSTICI: AI + STATISTICO -->
         <div class="section-accordion">
           <div class="section-accordion-header open" onclick="toggleAccordion(this)">
@@ -12967,7 +13034,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       
       <!-- PRESAGIO -->
       <div class="section-accordion">
-        <div class="section-accordion-header open" onclick="toggleAccordion(this)">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)">
           <div class="section-accordion-title"><span>◇</span> Presagio</div>
           <div style="display:flex;align-items:center;gap:10px;">
             <span style="font-size:0.6rem;background:linear-gradient(135deg,rgba(108,99,255,0.18),rgba(0,212,255,0.18));color:#a78bfa;padding:2px 8px;border-radius:8px;font-weight:700;letter-spacing:1px;">PRE-ANALISI</span>
@@ -12981,7 +13048,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       
       <!-- TRAP DETECTOR -->
       <div class="section-accordion">
-        <div class="section-accordion-header open" onclick="toggleAccordion(this)">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)">
           <div class="section-accordion-title"><span>🚨</span> Trap Detector</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
@@ -13004,7 +13071,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
       <!-- === v7: CONSENSUS ENGINE === -->
       <div class="section-accordion">
-        <div class="section-accordion-header open" onclick="toggleAccordion(this)" style="border-color:rgba(0,212,255,0.25);">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)" style="border-color:rgba(0,212,255,0.25);">
           <div class="section-accordion-title"><span>🏆</span> Consensus Engine</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
@@ -13021,7 +13088,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       
       <!-- === v7: REGRESSION SCORE === -->
       <div class="section-accordion">
-        <div class="section-accordion-header open" onclick="toggleAccordion(this)" style="border-color:rgba(139,92,246,0.2);">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)" style="border-color:rgba(139,92,246,0.2);">
           <div class="section-accordion-title"><span>📊</span> Regression Score</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
@@ -13037,6 +13104,12 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       </div>
 
       <!-- === STAKE ADVISOR rimosso: ora è un badge compatto in alto (vedi badges row analysis-actions) === -->
+
+      <!-- PATCH V12: SECTION GROUP HEADER -->
+      <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid #f59e0b;background:linear-gradient(90deg,rgba(245,158,11,0.06),transparent);border-radius:4px;">
+        <div style="font-size:0.72rem;font-weight:900;letter-spacing:1.5px;color:#f59e0b;text-transform:uppercase;">💰 Mercato &amp; Quote</div>
+        <div style="font-size:0.6rem;color:var(--text-dark);margin-top:2px;">Cosa dice il mercato dei bookmaker</div>
+      </div>
 
       <!-- === v7: ODDS LAB === -->
       <div class="section-accordion">
@@ -13099,6 +13172,12 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         </div>
       </div>
       
+      <!-- PATCH V12: SECTION GROUP HEADER -->
+      <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid #a855f7;background:linear-gradient(90deg,rgba(168,85,247,0.06),transparent);border-radius:4px;">
+        <div style="font-size:0.72rem;font-weight:900;letter-spacing:1.5px;color:#a855f7;text-transform:uppercase;">🔍 Dati &amp; Approfondimenti</div>
+        <div style="font-size:0.6rem;color:var(--text-dark);margin-top:2px;">Tutti i dettagli per chi vuole scavare a fondo</div>
+      </div>
+
       <!-- MULTIGOL COMBINATO -->
       <div class="section-accordion">
         <div class="section-accordion-header" onclick="toggleAccordion(this)">
@@ -14071,13 +14150,23 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
       const cached = gfCache[cacheKey];
       const CACHE_TTL = 15 * 60 * 1000;
 
-      // Se cache fresca E i dati super non sono cambiati, mostra direttamente
-      const superChanged = cached && (
-        (state.superAnalysis && !cached.data.hasSuperAlgo) ||
-        (state.superAIAnalysis && !cached.data.hasSuperAI)
-      );
+      // PATCH V12: fingerprint coerente con renderHeroVerdetto. Invalida la
+      // cache se i dati di Super Algo o Oracle AI sono cambiati dall'ultima
+      // computazione (es. l'utente ha cliccato "Analizza con SuperAI").
+      function aiInputFingerprint() {
+        const sAlgo = state.superAnalysis;
+        const sAI = state.superAIAnalysis;
+        let fp = '';
+        if (sAlgo) fp += 'A' + (sAlgo.timestamp || sAlgo.computedAt || 'x');
+        else fp += 'A0';
+        if (sAI) fp += '|I' + (sAI.timestamp || sAI.computedAt || 'x');
+        else fp += '|I0';
+        return fp;
+      }
+      const currentFp = aiInputFingerprint();
+      const fpMatches = cached && cached.aiFingerprint === currentFp;
 
-      if (cached && (now - cached.timestamp) < CACHE_TTL && !superChanged) {
+      if (cached && cached.data && fpMatches && (now - cached.timestamp) < CACHE_TTL) {
         renderGiudizioFinaleModal(m, d, cached.data, cached);
         return;
       }
@@ -14087,7 +14176,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
       // Salva in cache con storico variazioni
       if (!gfCache[cacheKey]) {
-        gfCache[cacheKey] = { timestamp: now, data: giudizio, history: [] };
+        gfCache[cacheKey] = { timestamp: now, data: giudizio, aiFingerprint: currentFp, history: [] };
       } else {
         const prev = gfCache[cacheKey].data;
         if (prev && prev.topMarkets[0]?.value !== giudizio.topMarkets[0]?.value) {
@@ -14096,6 +14185,7 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         }
         gfCache[cacheKey].timestamp = now;
         gfCache[cacheKey].data = giudizio;
+        gfCache[cacheKey].aiFingerprint = currentFp;
       }
       saveGFCache();
       renderGiudizioFinaleModal(m, d, giudizio, gfCache[cacheKey]);
@@ -14115,15 +14205,34 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         const HV_TTL = 15 * 60 * 1000;
         let giudizio;
         const now = Date.now();
-        if (cached && cached.data && (now - cached.timestamp) < HV_TTL) {
+
+        // PATCH V12: fingerprint dei dati di input per invalidare la cache
+        // quando "Analizza con SuperAI" produce nuovi dati. Prima il Verdetto
+        // restava bloccato sui vecchi calcoli per 15 minuti mentre il modal
+        // del Giudizio Finale (che ha logica diversa) si aggiornava subito.
+        function aiInputFingerprint() {
+          const sAlgo = state.superAnalysis;
+          const sAI = state.superAIAnalysis;
+          let fp = '';
+          if (sAlgo) fp += 'A' + (sAlgo.timestamp || sAlgo.computedAt || 'x');
+          else fp += 'A0';
+          if (sAI) fp += '|I' + (sAI.timestamp || sAI.computedAt || 'x');
+          else fp += '|I0';
+          return fp;
+        }
+        const currentFp = aiInputFingerprint();
+        const fpMatches = cached && cached.aiFingerprint === currentFp;
+
+        if (cached && cached.data && fpMatches && (now - cached.timestamp) < HV_TTL) {
           giudizio = cached.data;
         } else {
           giudizio = computeGiudizioFinale(m, d, state.superAnalysis, state.superAIAnalysis);
           if (!gfCache[cacheKey]) {
-            gfCache[cacheKey] = { timestamp: now, data: giudizio, history: [] };
+            gfCache[cacheKey] = { timestamp: now, data: giudizio, aiFingerprint: currentFp, history: [] };
           } else {
             gfCache[cacheKey].timestamp = now;
             gfCache[cacheKey].data = giudizio;
+            gfCache[cacheKey].aiFingerprint = currentFp;
           }
           try { saveGFCache(); } catch(e) {}
         }
