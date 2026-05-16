@@ -2,76 +2,29 @@
 // MULTIGOL — Modulo Multigol per BettingPro
 // ============================================================
 // File separato sullo stesso pattern di presagio.js. Calcola tutte
-// le combinazioni Multigol (globali + per squadra) usando Poisson +
-// Dixon-Coles e restituisce i top pronostici ordinati per probabilità.
+// le combinazioni Multigol (globali + per squadra) usando le funzioni
+// matematiche condivise da window.BettingProMath.
 //
-// Integrazione: includere DOPO app.js. Espone:
+// Integrazione: includere DOPO engine-math.js e DOPO app.js. Espone:
 //   window.Multigol.calculate(analysis) -> array di pronostici
 //   window.Multigol.getTopPicks(analysis, opts) -> top N per scoring
 //   window.Multigol.allMarkets() -> elenco di tutti i mercati definiti
 //
-// Author: BettingPro V12.2 — Fase 2 refactoring
+// Author: BettingPro V13 — refactoring step 1 (usa BettingProMath)
 // ============================================================
 
 (function() {
   'use strict';
 
-  // ---------------------------------------------------------
-  // FUNZIONI MATEMATICHE (Poisson + Dixon-Coles)
-  // Copiate da app.js per renderle indipendenti — nessun side effect.
-  // ---------------------------------------------------------
-
-  function poisson(lambda, k) {
-    if (lambda <= 0) return k === 0 ? 1 : 0;
-    let logP = -lambda + k * Math.log(lambda);
-    for (let i = 2; i <= k; i++) logP -= Math.log(i);
-    return Math.exp(logP);
+  function getMath() {
+    if (window.BettingProMath) return window.BettingProMath;
+    console.warn('window.BettingProMath non caricato — fallback inline');
+    return {
+      buildScoreMatrix: function() { return { matrix: [], total: 0 }; },
+      probMultigol: function() { return 0; }
+    };
   }
 
-  function dixonColesTau(i, j, lH, lA, rho) {
-    if (i === 0 && j === 0) return 1 - lH * lA * rho;
-    if (i === 1 && j === 0) return 1 + lA * rho;
-    if (i === 0 && j === 1) return 1 + lH * rho;
-    if (i === 1 && j === 1) return 1 - rho;
-    return 1;
-  }
-
-  function calcRho(homeXG, awayXG) {
-    const totalXG = homeXG + awayXG;
-    if (totalXG < 1.5) return 0.18;
-    if (totalXG < 2.0) return 0.14;
-    if (totalXG < 2.5) return 0.11;
-    if (totalXG < 3.0) return 0.09;
-    if (totalXG < 3.5) return 0.07;
-    return 0.05;
-  }
-
-  // ---------------------------------------------------------
-  // CORE: matrice score 7x7 con Dixon-Coles applicato
-  // Restituisce { matrix, total } dove matrix[i][j] = P(home=i, away=j)
-  // ---------------------------------------------------------
-  function buildScoreMatrix(homeXG, awayXG, maxGoals) {
-    maxGoals = maxGoals || 6;
-    const rho = calcRho(homeXG, awayXG);
-    const matrix = [];
-    let total = 0;
-    for (let i = 0; i <= maxGoals; i++) {
-      matrix[i] = [];
-      for (let j = 0; j <= maxGoals; j++) {
-        const rawP = poisson(homeXG, i) * poisson(awayXG, j);
-        if (isNaN(rawP)) { matrix[i][j] = 0; continue; }
-        const tau = dixonColesTau(i, j, homeXG, awayXG, rho);
-        const p = rawP * tau;
-        matrix[i][j] = p > 0 ? p : 0;
-        total += matrix[i][j];
-      }
-    }
-    return { matrix, total };
-  }
-
-  // ---------------------------------------------------------
-  // MERCATI MULTIGOL DEFINITI
-  // ---------------------------------------------------------
   const GLOBAL_RANGES = [
     { id: 'mg_0_1', label: 'Multigol 0-1', min: 0, max: 1, type: 'global' },
     { id: 'mg_0_2', label: 'Multigol 0-2', min: 0, max: 2, type: 'global' },
@@ -99,23 +52,7 @@
     { id: 'mgA_2_3', label: 'MG Ospite 2-3', min: 2, max: 3, type: 'away' }
   ];
 
-  // ---------------------------------------------------------
-  // CALCOLO PROBABILITÀ PER MERCATO
-  // ---------------------------------------------------------
-  function calcGlobalRange(matrix, total, min, max) {
-    if (total <= 0) return 0;
-    let p = 0;
-    for (let i = 0; i < matrix.length; i++) {
-      for (let j = 0; j < matrix[i].length; j++) {
-        const tot = i + j;
-        if (tot >= min && tot <= max) p += matrix[i][j];
-      }
-    }
-    return (p / total) * 100;
-  }
-
   function calcTeamRange(matrix, total, axis, min, max) {
-    // axis = 'home' (riga i) o 'away' (colonna j)
     if (total <= 0) return 0;
     let p = 0;
     for (let i = 0; i < matrix.length; i++) {
@@ -127,15 +64,6 @@
     return (p / total) * 100;
   }
 
-  // ---------------------------------------------------------
-  // API PUBBLICA
-  // ---------------------------------------------------------
-
-  /**
-   * Calcola tutte le probabilità Multigol per una partita.
-   * @param {Object} analysis - state.analysis (deve avere xG.home, xG.away)
-   * @returns {Array} array di { id, label, prob, min, max, type, icon, color }
-   */
   function calculate(analysis) {
     if (!analysis || !analysis.xG) return [];
     const homeXG = analysis.xG.home;
@@ -143,13 +71,14 @@
     if (typeof homeXG !== 'number' || typeof awayXG !== 'number') return [];
     if (homeXG < 0 || awayXG < 0) return [];
 
-    const { matrix, total } = buildScoreMatrix(homeXG, awayXG, 6);
-    if (total <= 0) return [];
+    const M = getMath();
+    const built = M.buildScoreMatrix(homeXG, awayXG, 6);
+    if (built.total <= 0) return [];
 
     const result = [];
 
     GLOBAL_RANGES.forEach(function(r) {
-      const prob = calcGlobalRange(matrix, total, r.min, r.max);
+      const prob = M.probMultigol(homeXG, awayXG, r.min, r.max);
       result.push({
         id: r.id, label: r.label, prob: prob,
         min: r.min, max: r.max, type: r.type,
@@ -158,7 +87,7 @@
     });
 
     HOME_RANGES.forEach(function(r) {
-      const prob = calcTeamRange(matrix, total, 'home', r.min, r.max);
+      const prob = calcTeamRange(built.matrix, built.total, 'home', r.min, r.max);
       result.push({
         id: r.id, label: r.label, prob: prob,
         min: r.min, max: r.max, type: r.type,
@@ -167,7 +96,7 @@
     });
 
     AWAY_RANGES.forEach(function(r) {
-      const prob = calcTeamRange(matrix, total, 'away', r.min, r.max);
+      const prob = calcTeamRange(built.matrix, built.total, 'away', r.min, r.max);
       result.push({
         id: r.id, label: r.label, prob: prob,
         min: r.min, max: r.max, type: r.type,
@@ -178,14 +107,6 @@
     return result;
   }
 
-  /**
-   * Restituisce i top N pronostici Multigol ordinati per probabilità,
-   * filtrati per soglia minima e prob massima (per evitare range degeneri
-   * come "Multigol 0-6" che ovviamente fa 100%).
-   * @param {Object} analysis
-   * @param {Object} opts - { minProb=50, maxProb=95, limit=5, excludeTypes=[] }
-   * @returns {Array}
-   */
   function getTopPicks(analysis, opts) {
     opts = opts || {};
     const minProb = opts.minProb != null ? opts.minProb : 50;
@@ -193,8 +114,7 @@
     const limit = opts.limit != null ? opts.limit : 5;
     const excludeTypes = opts.excludeTypes || [];
 
-    const all = calculate(analysis);
-    return all
+    return calculate(analysis)
       .filter(function(m) {
         if (excludeTypes.indexOf(m.type) >= 0) return false;
         if (m.prob < minProb || m.prob > maxProb) return false;
@@ -204,9 +124,6 @@
       .slice(0, limit);
   }
 
-  /**
-   * Elenco di tutti i mercati definiti (per debug / introspezione).
-   */
   function allMarkets() {
     return {
       global: GLOBAL_RANGES.slice(),
@@ -215,20 +132,15 @@
     };
   }
 
-  // ---------------------------------------------------------
-  // EXPORT su window
-  // ---------------------------------------------------------
   window.Multigol = {
     calculate: calculate,
     getTopPicks: getTopPicks,
-    allMarkets: allMarkets,
-    _internals: { buildScoreMatrix: buildScoreMatrix, calcRho: calcRho }
+    allMarkets: allMarkets
   };
 
-  // Marker per debug
   try {
     if (window.console && window.console.log) {
-      console.log('%c✓ Multigol module loaded', 'color:#06b6d4;font-weight:bold;');
+      console.log('%c✓ Multigol module loaded (using BettingProMath)', 'color:#06b6d4;font-weight:bold;');
     }
   } catch(e) {}
 

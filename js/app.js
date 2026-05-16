@@ -1,33 +1,39 @@
 // ===================================================
-    // BETTINGPRO v12.2 - LAYOUT SPLIT + MULTIGOL MODULE
+    // BETTINGPRO v13 - CREA MULTIPLA + REFACTORING INIZIATO
     // ===================================================
-    // V12.2 PATCH (rispetto a V12):
-    //   UI:
-    //   • Hero Verdetto + Tachimetro Pressione affiancati in 2 colonne
-    //     (responsive: si impilano su schermi stretti).
-    //   • Bottoni "Giudizio Finale" e "Analizza con SuperAI" spostati al
-    //     posto delle vecchie caselle MG Casa/Ospite (sotto i nomi squadre).
-    //     Layout flex con bottoni grandi e ben visibili.
-    //   • Hero Verdetto in modalita' compact: omette i pill dei 9 moduli
-    //     (visibili comunque nel modal Giudizio Finale) per fare spazio.
-    //   • Tutte le 15 accordion ora CHIUSE di default (incluse le 2 core
-    //     che prima erano aperte). L'utente le apre cliccandole.
+    // V13 PATCH (rispetto a V12.2):
     //
-    //   FASE 2 — NUOVO MODULO MULTIGOL (file separato):
-    //   • js/multigol.js → window.Multigol.calculate() / getTopPicks()
-    //     stesso pattern di presagio.js: self-contained, espone API su window
-    //   • Calcola 18 mercati Multigol (12 globali + 3 MG Casa + 3 MG Ospite)
-    //     usando Poisson + Dixon-Coles per coerenza con il resto.
-    //   • Integrato in computeGiudizioFinale: i top 5 Multigol ordinati per
-    //     probabilita' entrano nel ranking dei "Pronostici Classificati"
-    //     invece del singolo MG che c'era prima.
-    //   • Cosi' il Multigol diventa un cittadino di prima classe del
-    //     sistema, non un fanalino di coda.
+    //   TURNO 3 — CREA MULTIPLA AUTOMATICA:
+    //   • Nuovo file js/multipla.js (file separato come Presagio/Multigol)
+    //   • Pannello collassabile in home: "🎰 Crea Multipla Auto"
+    //   • Form: N° eventi (2-6) + Quota target (3x/5x/10x/20x/50x)
+    //   • Algoritmo: per ogni candidato calcola "fitness" = proximityScore
+    //     × qualityScore, dove proximity = exp(-|quotaSintetica - quotaIdeale|·1.5)
+    //     e qualityScore dipende dalla confidence (high=1.0, med=0.85, low=0.65).
+    //     Cosi' i pick con quota piu' vicina al target hanno priorita',
+    //     non quelli con prob piu' alta in assoluto.
+    //   • Output: lista dei pick selezionati + quota composta + prob composta
+    //     + deviation dal target. Tap su un pick apre l'analisi della partita.
+    //   • Usa state.dailyPicks.matchAdvices come fonte dati (gia' pre-calcolato).
     //
-    //   PIANO FUTURO:
-    //   • Turno 3: sezione "Crea Multipla" auto-generata
-    //   • Turno 4: refactoring di engine-math, engine-trap, engine-reverse,
-    //              engine-consensus, engine-giudizio in file separati
+    //   TURNO 4 — REFACTORING (passo 1):
+    //   • Nuovo file js/engine-math.js: funzioni matematiche pure condivise
+    //     - poisson, dixonColesTau, calcDixonColesRho
+    //     - buildScoreMatrix(homeXG, awayXG, maxGoals)
+    //     - prob1X2, probOverUnder, probBTTS, probMultigol
+    //   • Esposto su window.BettingProMath (v1.0.0)
+    //   • multigol.js riscritto per usare BettingProMath invece di funzioni
+    //     duplicate inline (passato da 235 a 165 righe, -30%)
+    //   • app.js NON toccato: continua a usare le sue versioni locali per
+    //     stabilita'. Sara' migrato a BettingProMath nei prossimi turni in
+    //     modo graduale e testato.
+    //
+    //   RESTA DA FARE (turni futuri):
+    //   • Migrazione app.js a usare BettingProMath dove possibile
+    //   • engine-trap.js (estrazione Trap Detector)
+    //   • engine-reverse.js (Reverse xG + Reverse Quote)
+    //   • engine-consensus.js (Consensus + Regression)
+    //   • engine-giudizio.js (computeGiudizioFinale + Coro)
     // ===================================================
     
     // ============================================
@@ -12633,6 +12639,16 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           } catch(e) { console.warn('Amico error:', e); return ''; }
         })()}
         <!-- PATCH V11: Sezione "Trova i Migliori Pick" rimossa su richiesta utente. -->
+
+        <!-- PATCH V13 (Turno 3): pannello "Crea Multipla Auto" generato dal modulo multipla.js -->
+        ${(() => {
+          try {
+            if (window.Multipla && typeof window.Multipla.renderPanel === 'function') {
+              return window.Multipla.renderPanel();
+            }
+          } catch(e) { console.warn('Multipla render error:', e); }
+          return '';
+        })()}
       `;
     }
     
