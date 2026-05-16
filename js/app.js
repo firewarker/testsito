@@ -6783,10 +6783,10 @@ async function analyzeMatch(match) {
         }
         
         // Prendi quote da TUTTI i bookmaker disponibili
-        // PATCH V17.3: cache busting esplicito quando bypassCache (timestamp evita stale)
-        const params = { fixture: fixtureId };
-        if (bypassCache) params._t = Date.now();
-        const data = await callAPIFootball('/odds', params);
+        // PATCH V17.4: rimosso `_t` cache buster perché veniva inoltrato dal
+        // Worker ad API-Football che lo rifiutava come parametro sconosciuto.
+        // Il bypass della oddsLabCache interna basta per forzare un fetch reale.
+        const data = await callAPIFootball('/odds', { fixture: fixtureId });
         const bookmakers = data?.response?.[0]?.bookmakers || [];
         if (!bookmakers.length) {
           // Salvo anche il "vuoto" in cache per evitare retry ogni volta
