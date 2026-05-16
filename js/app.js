@@ -3196,6 +3196,86 @@
     }
     window.refreshMatchResult = refreshMatchResult;
 
+    // PATCH V17.2: Pulsante "Carica quote" / "Riprova quote"
+    // Forza il refetch delle quote per la partita corrente e ricalcola TUTTI
+    // i moduli che dipendono dalle quote (Reverse xG, Odds Lab, Value Bets,
+    // Regression, Consensus, Trap, Giudizio Finale).
+    async function reloadQuotesForCurrentMatch() {
+      const m = state.selectedMatch;
+      if (!m) { console.warn('reloadQuotes: nessuna partita selezionata'); return; }
+      if (!state.analysis) { console.warn('reloadQuotes: analisi non pronta'); return; }
+      
+      console.log('🔄 Reload quote per ' + m.home.name + ' vs ' + m.away.name);
+      
+      // Reset stati per mostrare "Caricamento..." durante il fetch
+      state.oddsLab = null;
+      state.valueBets = null;
+      state.bookmakerOdds = null;
+      state.reverseXgResult = null;
+      render();
+      
+      try {
+        // PATCH V17.3: passa bypassCache=true per forzare un fetch fresco
+        // (ignora la cache interna 10min e aggiunge timestamp all'URL)
+        const oddsLab = await fetchOddsLab(m.id, /*bypassCache*/ true);
+        state.oddsLab = oddsLab || false;
+        if (!oddsLab) {
+          console.log('ℹ️ Reload: API risponde ancora vuoto per questa partita');
+          state.valueBets = false;
+          render();
+          return;
+        }
+        
+        // Aggiorna anche bookmakerOdds (per Reverse xG)
+        if (oddsLab.bookmakers && oddsLab.bookmakers.length > 0) {
+          const firstBk = oddsLab.bookmakers[0];
+          if (firstBk.odds1X2) {
+            state.bookmakerOdds = {
+              source: firstBk.name,
+              homeOdd: firstBk.odds1X2.home,
+              drawOdd: firstBk.odds1X2.draw,
+              awayOdd: firstBk.odds1X2.away
+            };
+            // Ricalcola Reverse xG
+            if (state.analysis.xG) {
+              state.reverseXgResult = calculateReverseXG(
+                state.bookmakerOdds,
+                state.analysis.xG.home,
+                state.analysis.xG.away
+              );
+            }
+          }
+        }
+        
+        // Registra quote OU/BTTS per tracking
+        try { captureOddsFromLab(m.id, oddsLab); } catch(e) {}
+        
+        // Ricalcola tutti i moduli che dipendono dalle quote
+        state.valueBets = calculateValueBets(state.analysis, oddsLab);
+        state.regressionScore = calculateRegressionScore(m, state.analysis, oddsLab);
+        const ai = generateAIAdvice(m, state.analysis);
+        state.consensus = buildConsensusEngine(
+          m, state.analysis, ai, oddsLab,
+          state.regressionScore, state.superAIAnalysis, state.superAnalysis
+        );
+        
+        // Invalida cache Giudizio Finale (forza ricalcolo col dato nuovo)
+        const cacheKey = String(m.id);
+        if (gfCache[cacheKey]) {
+          gfCache[cacheKey].aiFingerprint = 'forced-reload-' + Date.now();
+        }
+        
+        console.log('✅ Quote ricaricate: ' + oddsLab.bookmakers.length + ' bookmaker. Verdetto e ranking aggiornati.');
+        render();
+      } catch(e) {
+        console.error('❌ Errore reload quote:', e);
+        state.oddsLab = false;
+        state.valueBets = false;
+        render();
+      }
+    }
+    window.reloadQuotesForCurrentMatch = reloadQuotesForCurrentMatch;
+
     // === API STATUS CHECK ===
     async function checkAPIStatus() {
       console.log('&#x1F50D; Controllo stato API...');
@@ -5499,10 +5579,20 @@ async function analyzeMatch(match) {
           if (advice.confidence === 'high') advice.confidence = 'medium';
           else if (advice.confidence === 'medium') advice.confidence = 'low';
           advice.prob = blendedProb;
-          advice.reasons.push({
-            text: `⚠️ Reverse Quote: forte disaccordo col mercato su ${rqOU.market}. Modello ${rqOU.modelProb.toFixed(0)}% vs bookie sharp ${rqOU.bookProb.toFixed(0)}% (Δ ${rqOU.delta.toFixed(1)}%). Confidence declassata, probabilita' fusa col mercato.`,
-            type: 'negative'
-          });
+          // PATCH V17.2: messaggio piu' chiaro. "Disaccordo" suggeriva contraddizione
+          // ma in realta' il mercato spesso CONFERMA il pick (sopra 50%), solo con
+          // probabilita' diversa dal nostro modello. Distinguo i 2 casi:
+          //   • bookie > 50% sul pick → mercato concorda ma con prob diversa
+          //   • bookie < 50% sul pick → mercato vede il contrario
+          let revText;
+          if (rqOU.bookProb >= 50) {
+            // Mercato concorda ma con intensita' diversa
+            revText = `\u26A0\uFE0F Reverse Quote: mercato concorda su ${rqOU.market} ma con prob piu' bassa. Modello ${rqOU.modelProb.toFixed(0)}% vs bookie sharp ${rqOU.bookProb.toFixed(0)}% (\u0394 ${rqOU.delta.toFixed(1)}%). Probabilita' fusa a ${blendedProb.toFixed(0)}% e confidence declassata.`;
+          } else {
+            // Mercato vede l'opposto del pick
+            revText = `\u26A0\uFE0F Reverse Quote: mercato sharp NON crede a ${rqOU.market}. Modello ${rqOU.modelProb.toFixed(0)}% vs bookie ${rqOU.bookProb.toFixed(0)}% (\u0394 ${rqOU.delta.toFixed(1)}%). Probabilita' fusa a ${blendedProb.toFixed(0)}% e confidence declassata.`;
+          }
+          advice.reasons.push({ text: revText, type: 'negative' });
           if (rqOU.delta < -15) {
             advice.alternatives.unshift({
               pick: rqOU.oppositePick + ' (sharp money)',
@@ -6668,12 +6758,41 @@ async function analyzeMatch(match) {
     // ============================================================
     // 1. ODDS LAB — Multi-bookmaker + Steam Move Detection
     // ============================================================
-    async function fetchOddsLab(fixtureId) {
+    // PATCH V17.3: cache in memoria per le quote (10 min TTL).
+    // Evita di rifare la chiamata API ogni volta che l'utente esce/rientra
+    // nella stessa partita. La cache si svuota dopo 10 min (le quote possono
+    // cambiare nel tempo, soprattutto a ridosso del kick-off).
+    // Per forzare un refetch, usa il bottone "🔄 Carica quote" che chiama
+    // fetchOddsLab(id, /*bypassCache*/ true).
+    const oddsLabCache = {}; // { fixtureId: { data, timestamp } }
+    const ODDS_CACHE_TTL = 10 * 60 * 1000; // 10 minuti
+
+    async function fetchOddsLab(fixtureId, bypassCache) {
       try {
+        // Cache check (skip se bypassCache=true)
+        if (!bypassCache && oddsLabCache[fixtureId]) {
+          const entry = oddsLabCache[fixtureId];
+          if (Date.now() - entry.timestamp < ODDS_CACHE_TTL) {
+            const ageMin = Math.round((Date.now() - entry.timestamp) / 60000);
+            console.log('💾 Odds Lab dalla cache (' + ageMin + 'min fa) per fixture ' + fixtureId);
+            return entry.data;
+          } else {
+            // Scaduta, rimuovo
+            delete oddsLabCache[fixtureId];
+          }
+        }
+        
         // Prendi quote da TUTTI i bookmaker disponibili
-        const data = await callAPIFootball('/odds', { fixture: fixtureId });
+        // PATCH V17.3: cache busting esplicito quando bypassCache (timestamp evita stale)
+        const params = { fixture: fixtureId };
+        if (bypassCache) params._t = Date.now();
+        const data = await callAPIFootball('/odds', params);
         const bookmakers = data?.response?.[0]?.bookmakers || [];
-        if (!bookmakers.length) return null;
+        if (!bookmakers.length) {
+          // Salvo anche il "vuoto" in cache per evitare retry ogni volta
+          oddsLabCache[fixtureId] = { data: null, timestamp: Date.now() };
+          return null;
+        }
         
         const result = { bookmakers: [], sharp: null, consensus: null, steamMoves: [], markets: {} };
         
@@ -6805,6 +6924,9 @@ async function analyzeMatch(match) {
           result.markets.btts = { avgYes: avgYes.toFixed(2), avgNo: avgNo.toFixed(2), impliedYes: ((1/avgYes)*100).toFixed(1), impliedNo: ((1/avgNo)*100).toFixed(1) };
         }
         
+        // PATCH V17.3: salva in cache (10 min TTL) per evitare refetch a ogni
+        // riapertura della stessa partita.
+        oddsLabCache[fixtureId] = { data: result, timestamp: Date.now() };
         return result;
       } catch(e) {
         Logger.log('fetchOddsLab', e, 'warn');
@@ -12075,12 +12197,41 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           
         </div>
         
-        <!-- PATCH V12.1: HERO VERDETTO + TACHIMETRO in layout split (2 colonne) -->
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;align-items:stretch;">
-          <div style="flex:1 1 320px;min-width:280px;">
+        <!-- PATCH V17.2: HERO VERDETTO + RISULTATO ESATTO + TACHIMETRO in 3 colonne -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;align-items:stretch;">
+          <div style="flex:1 1 300px;min-width:260px;">
             ${renderHeroVerdetto(m, d, /*compact*/ true)}
           </div>
-          <div style="flex:1 1 240px;min-width:220px;max-width:340px;">
+          <!-- COLONNA CENTRALE: Risultato Esatto -->
+          ${(() => {
+            const exactScores = d.exactScores || [];
+            const topExact = exactScores[0];
+            if (!topExact || typeof topExact.h !== 'number') return '';
+            const exactProb = (topExact.prob || topExact.p || 0);
+            const top3 = exactScores.slice(0, 3).filter(s => typeof s.h === 'number');
+
+            return `
+            <div style="flex:0 0 auto;min-width:120px;max-width:160px;display:flex;flex-direction:column;">
+              <div style="height:100%;background:linear-gradient(135deg,rgba(0,229,160,0.06),rgba(0,212,255,0.06));border:1.5px solid rgba(0,229,160,0.30);border-radius:14px;padding:12px 10px;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center;">
+                <div style="font-size:0.55rem;font-weight:900;color:#00e5a0;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:4px;">
+                  <span>\u{1F3AF}</span> Risultato Esatto
+                </div>
+                <div style="font-size:2rem;font-weight:900;color:#00e5a0;letter-spacing:2px;line-height:1;margin-bottom:4px;text-shadow:0 0 20px rgba(0,229,160,0.4);">
+                  ${topExact.h}-${topExact.a}
+                </div>
+                <div style="font-size:0.85rem;font-weight:800;color:#00d4ff;margin-bottom:8px;">
+                  ${exactProb.toFixed(0)}%
+                </div>
+                ${top3.length > 1 ? `
+                  <div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;width:100%;display:flex;flex-direction:column;gap:3px;">
+                    <div style="font-size:0.5rem;color:var(--text-dark);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:1px;">Alternative</div>
+                    ${top3.slice(1).map(s => '<div style="font-size:0.68rem;color:var(--text-gray);display:flex;justify-content:space-between;"><span style="font-weight:700;color:#fff;">' + s.h + '-' + s.a + '</span><span>' + ((s.prob || s.p) || 0).toFixed(0) + '%</span></div>').join('')}
+                  </div>
+                ` : ''}
+              </div>
+            </div>`;
+          })()}
+          <div style="flex:1 1 220px;min-width:200px;max-width:320px;">
             ${(() => {
               if (!d.xG) return '';
               const homeXG = d.xG.home;
@@ -12258,26 +12409,9 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         </div>
       </div>
       
-      <!-- TRAP DETECTOR -->
-      <div class="section-accordion">
-        <div class="section-accordion-header" onclick="toggleAccordion(this)">
-          <div class="section-accordion-title"><span>🚨</span> Trap Detector</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            ${(() => {
-              try {
-                const t = calculateTrapScore(m, d, ai);
-                const bg = t.level === 'trap' ? 'rgba(239,68,68,0.12)' : t.level === 'risk' ? 'rgba(249,115,22,0.12)' : t.level === 'caution' ? 'rgba(251,191,36,0.12)' : 'rgba(16,185,129,0.12)';
-                const cl = t.color;
-                return '<span style="font-size:0.6rem;background:' + bg + ';color:' + cl + ';padding:2px 8px;border-radius:8px;font-weight:800;">' + t.score + '/100 ' + t.label + '</span>';
-              } catch(e) { return ''; }
-            })()}
-            <span class="section-accordion-arrow">▼</span>
-          </div>
-        </div>
-        <div class="section-accordion-body open">
-          ${safeRender(() => renderTrapDetector(m, d, ai), '', 'TrapDetector')}
-        </div>
-      </div>
+      <!-- PATCH V17.2: Trap Detector spostato nella sezione "💰 Mercato & Quote"
+           perche' lavora soprattutto su segnali di mercato (favorito netto, quote
+           basse, sharp money). Vedere sotto, dopo il divider arancio. -->
       
       <!-- NG INSIGHT -->
 
@@ -12317,10 +12451,45 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
 
       <!-- === STAKE ADVISOR rimosso: ora è un badge compatto in alto (vedi badges row analysis-actions) === -->
 
-      <!-- PATCH V12: SECTION GROUP HEADER -->
-      <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid #f59e0b;background:linear-gradient(90deg,rgba(245,158,11,0.06),transparent);border-radius:4px;">
-        <div style="font-size:0.72rem;font-weight:900;letter-spacing:1.5px;color:#f59e0b;text-transform:uppercase;">💰 Mercato &amp; Quote</div>
-        <div style="font-size:0.6rem;color:var(--text-dark);margin-top:2px;">Cosa dice il mercato dei bookmaker</div>
+      <!-- PATCH V17.2: SECTION GROUP HEADER + BOTTONE CARICA QUOTE -->
+      <div style="margin:24px 0 8px;padding:8px 14px;border-left:3px solid #f59e0b;background:linear-gradient(90deg,rgba(245,158,11,0.06),transparent);border-radius:4px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:0.72rem;font-weight:900;letter-spacing:1.5px;color:#f59e0b;text-transform:uppercase;">💰 Mercato &amp; Quote</div>
+          <div style="font-size:0.6rem;color:var(--text-dark);margin-top:2px;">Cosa dice il mercato dei bookmaker</div>
+        </div>
+        ${(() => {
+          // PATCH V17.2: pulsante "Carica quote" quando state.oddsLab e' false/null
+          // (API non ha ancora risposto o ha ritornato vuoto). Ritrigger fetch +
+          // tutti i moduli che dipendono dalle quote.
+          const needsLoad = state.oddsLab === false || state.oddsLab === null || state.oddsLab === undefined;
+          if (needsLoad) {
+            return '<button onclick="reloadQuotesForCurrentMatch()" style="background:linear-gradient(135deg,#f59e0b,#fbbf24);border:none;color:#0a0f1e;padding:8px 14px;border-radius:10px;font-size:0.72rem;font-weight:800;cursor:pointer;letter-spacing:0.4px;display:flex;align-items:center;gap:6px;white-space:nowrap;box-shadow:0 0 12px rgba(245,158,11,0.3);">' +
+              '🔄 ' + (state.oddsLab === null || state.oddsLab === undefined ? 'Carica quote' : 'Riprova quote') +
+              '</button>';
+          }
+          return '<button onclick="reloadQuotesForCurrentMatch()" title="Forza refresh delle quote" style="background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text-gray);padding:6px 10px;border-radius:8px;font-size:0.65rem;font-weight:700;cursor:pointer;">🔄 Aggiorna</button>';
+        })()}
+      </div>
+
+      <!-- PATCH V17.2: Trap Detector spostato in MERCATO & QUOTE -->
+      <!-- (usa pesantemente le quote: favorito netto = quote basse → segnale trap) -->
+      <div class="section-accordion">
+        <div class="section-accordion-header" onclick="toggleAccordion(this)">
+          <div class="section-accordion-title"><span>🚨</span> Trap Detector</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${(() => {
+              try {
+                const trap = calculateTrapScore(m, d, ai);
+                if (!trap) return '<span style="font-size:0.6rem;color:var(--text-dark);">N/A</span>';
+                return '<span style="font-size:0.6rem;background:' + trap.color + '20;color:' + trap.color + ';padding:2px 8px;border-radius:8px;font-weight:700;">' + trap.score + '/100 ' + trap.label + '</span>';
+              } catch(e) { return '<span style="font-size:0.6rem;color:var(--text-dark);">N/A</span>'; }
+            })()}
+            <span class="section-accordion-arrow">▼</span>
+          </div>
+        </div>
+        <div class="section-accordion-body">
+          ${safeRender(() => renderTrapDetector(m, d, ai), '', 'TrapDetector')}
+        </div>
       </div>
 
       <!-- === v7: ODDS LAB === -->
@@ -13553,41 +13722,15 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
                 modulesPills +
               '</div>'
             ) : '') +
-            // PATCH V17: NUOVA RIGA con Seconda Scelta + Risultato Esatto
-            (() => {
-              const exactScores = d.exactScores || [];
-              const topExact = exactScores[0];
-              const hasExact = topExact && typeof topExact.h === 'number' && typeof topExact.a === 'number';
-              const exactProb = hasExact ? (topExact.prob || topExact.p || 0) : 0;
-              // 3 risultati piu' probabili per il tooltip
-              const top3Exact = exactScores.slice(0, 3).filter(s => typeof s.h === 'number');
-
-              if (!second && !hasExact) return '';
-
-              return '<div style="display:grid;grid-template-columns:' + (second && hasExact ? '1fr 1fr' : '1fr') + ';gap:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
-                // Seconda scelta
-                (second ? (
-                  '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;padding:6px 8px;">' +
-                    '<div style="font-size:0.5rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Seconda scelta</div>' +
-                    '<div style="display:flex;align-items:center;gap:6px;">' +
-                      '<span style="font-size:0.78rem;color:#fff;font-weight:700;">' + second.icon + ' ' + esc(second.value) + '</span>' +
-                      '<span style="font-size:0.65rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
-                    '</div>' +
-                  '</div>'
-                ) : '') +
-                // Risultato Esatto
-                (hasExact ? (
-                  '<div style="background:linear-gradient(135deg,rgba(0,229,160,0.04),rgba(0,212,255,0.04));border:1px solid rgba(0,229,160,0.22);border-radius:8px;padding:6px 8px;" title="' +
-                    top3Exact.map(s => s.h + '-' + s.a + ' ' + ((s.prob||s.p)||0).toFixed(0) + '%').join(' | ') + '">' +
-                    '<div style="font-size:0.5rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">\u{1F3AF} Risultato Esatto</div>' +
-                    '<div style="display:flex;align-items:center;gap:6px;">' +
-                      '<span style="font-size:0.95rem;color:#00e5a0;font-weight:900;letter-spacing:1px;">' + topExact.h + '-' + topExact.a + '</span>' +
-                      '<span style="font-size:0.6rem;font-weight:800;color:#00d4ff;">' + exactProb.toFixed(0) + '%</span>' +
-                    '</div>' +
-                  '</div>'
-                ) : '') +
-              '</div>';
-            })() +
+            // PATCH V17.2: Risultato Esatto rimosso dal Verdetto Hero — ora ha
+            // una sua colonna separata tra Verdetto e Tachimetro.
+            (second ? (
+              '<div style="display:flex;align-items:center;gap:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
+                '<span style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.6px;">Seconda scelta</span>' +
+                '<span style="font-size:0.78rem;color:#fff;font-weight:700;">' + second.icon + ' ' + esc(second.value) + '</span>' +
+                '<span style="font-size:0.7rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
+              '</div>'
+            ) : '') +
           '</div>';
       } catch(e) {
         console.warn('renderHeroVerdetto error:', e);
