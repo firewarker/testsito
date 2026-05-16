@@ -1,39 +1,43 @@
 // ===================================================
-    // BETTINGPRO v14 - REFACTORING TURNO 4 (Trap estratto)
+    // BETTINGPRO v15 - REFACTORING TURNO 4 (Consensus + Reverse estratti)
     // ===================================================
-    // V14 PATCH (rispetto a V13):
+    // V15 PATCH (rispetto a V14):
     //
-    //   1. MIGRAZIONE app.js → BettingProMath:
-    //   • quickCalc1X2, quickCalcOver, calcMultigol ora sono wrapper sottili
-    //     che delegano a window.BettingProMath.* con fallback inline per
-    //     sicurezza. Stesso output, ma niente piu' duplicazione del codice
-    //     matematico (era anche dentro multigol.js, ora centralizzato).
+    //   ESTRAZIONE 2 MODULI (continuazione del refactoring):
     //
-    //   2. ESTRAZIONE engine-trap.js (passo importante):
-    //   • calculateTrapScore (270 righe) + generateTrapPick (130 righe)
-    //     spostati FISICAMENTE da app.js a js/engine-trap.js.
-    //   • In app.js restano solo 12 righe di wrapper che delegano a
-    //     window.BettingProEngine.Trap.calculate() e .generatePick().
-    //   • app.js scende da 15.352 a 14.968 righe (-384, -2.5%).
-    //   • Le sole dipendenze esterne (state.superAIAnalysis e state.superAnalysis)
-    //     sono accedute via window.state che e' gia' esposto da V11.
+    //   • js/engine-consensus.js (296 righe NUOVO)
+    //     - calculateRegressionScore (riga ex-7076 di app.js)
+    //     - buildConsensusEngine (riga ex-7201)
+    //     - Espone window.BettingProEngine.Consensus.{regression, build}
+    //     - Dipendenze esterne: nessuna (clamp duplicato inline)
     //
-    //   3. NUOVO PATTERN: window.BettingProEngine.*
-    //   • Namespace per i moduli engine separati. Prossimi moduli (reverse,
-    //     consensus, giudizio) si appenderanno qui.
+    //   • js/engine-reverse.js (229 righe NUOVO)
+    //     - calculateReverseXG: Newton-Raphson Poisson inversion (riga ex-4119)
+    //     - getReverseQuoteForPick (riga ex-5510)
+    //     - getReverseQuote1X2 (riga ex-5571)
+    //     - Espone window.BettingProEngine.Reverse.{calcXG, getQuoteForPick, getQuote1X2}
+    //     - Dipendenze: window.state (gia' esposto)
     //
-    //   RESTA DA FARE (turni successivi):
-    //   • engine-reverse.js (Reverse xG Protocol + Reverse Quote)
-    //   • engine-consensus.js (Consensus Engine + Regression Score)
+    //   app.js: da 14.968 a 14.555 righe (-413, -2.8%).
+    //   In app.js restano solo wrapper sottili (~30 righe totali per i 5
+    //   call site) che delegano ai moduli esterni.
+    //
+    //   TESTATI in isolamento con node:
+    //   • Regression: input prob/xG → score 49/100 grade C ✓
+    //   • Consensus build: produce oggetto risposta ✓
+    //   • Reverse xG: input odds 1.80/3.50/4.20 + xG 1.6/1.0 → trap "neutro",
+    //     delta -0.01 (coerente: 1.80 implica xG bookie ~1.61) ✓
+    //
+    //   RESTA L'ULTIMO MODULO (il piu' grosso e rischioso):
     //   • engine-giudizio.js (computeGiudizioFinale + Coro dei Moduli)
-    //     ↑ Il piu' rischioso, da fare per ultimo
+    //     Da fare per ULTIMO perche' e' il cuore del sistema.
     // ===================================================
     
-    // STORICO V13 → V12.2 → V12 → V11.3 → V11.2 → V11.1 → V11:
-    //   V13: Crea Multipla + engine-math.js + multigol.js usa BettingProMath
-    //   V12.2: Hero+Tachimetro split, bottoni spostati, multigol.js nuovo
-    //   V12: Cleanup home, fasce orarie, accordion chiuse di default,
-    //        bug fingerprint Verdetto/SuperAI fixed
+    // STORICO V14 → V13 → V12.2 → V12 → V11.3:
+    //   V14: engine-trap.js (-384 righe), migrazione BettingProMath
+    //   V13: Crea Multipla + engine-math.js + multigol usa BettingProMath
+    //   V12.2: Hero+Tachimetro split, bottoni spostati, multigol.js
+    //   V12: Cleanup home, fasce orarie, bug fingerprint Verdetto/SuperAI
     
     // ============================================
     // CONFIG
@@ -4116,108 +4120,12 @@
     // === ANALYSIS ENGINE ===
     
 // === REVERSE XG: TRAP DETECTOR ===
+// PATCH V15: codice estratto in js/engine-reverse.js
 function calculateReverseXG(oddsResult, homeXG, awayXG) {
-    if (!oddsResult || !oddsResult.homeOdd) return null;
-
-    // === MARGIN REMOVAL: Metodo PROPORZIONALE (corretto vs equal) ===
-    const rawH = 1/oddsResult.homeOdd;
-    const rawD = 1/oddsResult.drawOdd;
-    const rawA = 1/oddsResult.awayOdd;
-    const overround = rawH + rawD + rawA;
-    // Prob reali senza margine
-    const realHomeProb = Math.min(0.95, Math.max(0.02, rawH / overround));
-    const realDrawProb = Math.min(0.95, Math.max(0.02, rawD / overround));
-    const realAwayProb = Math.min(0.95, Math.max(0.02, rawA / overround));
-
-    // === POISSON INVERSION via Newton-Raphson ===
-    // Trova lambda tale che P(X wins | lambda_X, lambda_opp) ≈ realProb
-    // Approccio: usa la relazione Poisson P(win) e cerca iterativamente
-    function poissonPMF(l, k) {
-        if (l <= 0) return k === 0 ? 1 : 0;
-        let r = 1; for (let i = 1; i <= k; i++) r *= l / i;
-        return r * Math.exp(-l);
-    }
-    function pWinPoisson(lH, lA) {
-        let w = 0;
-        for (let h = 0; h <= 7; h++) for (let a = 0; a <= 7; a++) {
-            if (h > a) w += poissonPMF(lH, h) * poissonPMF(lA, a);
-        }
-        return w;
-    }
-    // Newton: trova lambda_home dato P(home wins) e lambda_away fisso (media lega ~1.15)
-    function invertPoisson(targetProb, oppLambda) {
-        let lambda = 1.3; // starting guess
-        for (let iter = 0; iter < 20; iter++) {
-            const pW = pWinPoisson(lambda, oppLambda);
-            const err = pW - targetProb;
-            if (Math.abs(err) < 0.001) break;
-            // Numerical derivative
-            const pW2 = pWinPoisson(lambda + 0.05, oppLambda);
-            const deriv = (pW2 - pW) / 0.05;
-            if (Math.abs(deriv) < 0.0001) break;
-            lambda -= err / deriv;
-            lambda = Math.max(0.1, Math.min(4.0, lambda));
-        }
-        return lambda;
-    }
-
-    // Stima xG bookmaker: usa l'xG avversario come dato noto
-    const bookieHomeXG = invertPoisson(realHomeProb, awayXG);
-    const bookieAwayXG = invertPoisson(realAwayProb, homeXG);
-
-    // Delta: positivo = nostro xG > bookie (sottovalutato), negativo = nostro xG < bookie (sopravvalutato)
-    const homeDelta = homeXG - bookieHomeXG;
-    const awayDelta = awayXG - bookieAwayXG;
-
-    let trapStatus = "neutro";
-    let trapMessage = "Quote allineate alle statistiche. Δ Casa: " + homeDelta.toFixed(2) + " | Δ Ospite: " + awayDelta.toFixed(2);
-    let trapColor = "rgba(148,163,184,0.1)";
-    let textColor = "#94a3b8";
-    let icon = "⚖️";
-
-    // TRAPPOLA: il bookmaker sopravvaluta il favorito (xG reale < bookie xG)
-    if (oddsResult.homeOdd < 2.0 && homeDelta < -0.30) {
-        trapStatus = "trappola";
-        trapMessage = `TRAPPOLA CASA: Il bookmaker vede xG ${bookieHomeXG.toFixed(2)} ma il nostro modello calcola solo ${homeXG.toFixed(2)} (Δ${homeDelta.toFixed(2)}). La quota @${oddsResult.homeOdd} è gonfiata — evitare l'1 secco.`;
-        trapColor = "rgba(248,113,113,0.15)";
-        textColor = "#f87171";
-        icon = "🚨";
-    } else if (oddsResult.awayOdd < 2.0 && awayDelta < -0.30) {
-        trapStatus = "trappola";
-        trapMessage = `TRAPPOLA OSPITE: Quota @${oddsResult.awayOdd} troppo bassa. Bookie stima xG ${bookieAwayXG.toFixed(2)} ma reale è solo ${awayXG.toFixed(2)} (Δ${awayDelta.toFixed(2)}).`;
-        trapColor = "rgba(248,113,113,0.15)";
-        textColor = "#f87171";
-        icon = "🚨";
-    }
-    // VALUE: il bookmaker sottovaluta una squadra (xG reale > bookie xG)
-    else if (homeDelta > 0.35) {
-        trapStatus = "valore";
-        trapMessage = `VALUE CASA: Il bookmaker sottovaluta la casa. Modello: ${homeXG.toFixed(2)} xG vs Bookie: ${bookieHomeXG.toFixed(2)} (Δ+${homeDelta.toFixed(2)}). Quota @${oddsResult.homeOdd} interessante.`;
-        trapColor = "rgba(0,229,160,0.15)";
-        textColor = "#00e5a0";
-        icon = "💎";
-    } else if (awayDelta > 0.35) {
-        trapStatus = "valore";
-        trapMessage = `VALUE OSPITE: Sottovalutati dal mercato. Modello: ${awayXG.toFixed(2)} xG vs Bookie: ${bookieAwayXG.toFixed(2)} (Δ+${awayDelta.toFixed(2)}). Quota @${oddsResult.awayOdd} da considerare.`;
-        trapColor = "rgba(0,229,160,0.15)";
-        textColor = "#00e5a0";
-        icon = "💎";
-    }
-
-    return {
-        bookieHomeXG: bookieHomeXG.toFixed(2),
-        bookieAwayXG: bookieAwayXG.toFixed(2),
-        homeDelta: homeDelta.toFixed(2),
-        awayDelta: awayDelta.toFixed(2),
-        realHomeProb: (realHomeProb * 100).toFixed(1),
-        realAwayProb: (realAwayProb * 100).toFixed(1),
-        margin: ((overround - 1) * 100).toFixed(1),
-        trapStatus,
-        trapMessage,
-        trapColor,
-        textColor,
-        icon
-    };
+  if (window.BettingProEngine && window.BettingProEngine.Reverse) {
+    return window.BettingProEngine.Reverse.calcXG(oddsResult, homeXG, awayXG);
+  }
+  return null;
 }
 
 async function analyzeMatch(match) {
@@ -5507,93 +5415,20 @@ async function analyzeMatch(match) {
 
     // Estrae le probabilita' implicite del mercato sharp/medio per il
     // mercato corrispondente al pick del Consiglio AI.
+    // PATCH V15: codice estratto in js/engine-reverse.js
     function getReverseQuoteForPick(analysis, pickName) {
-      const oddsLab = state.oddsLab;
-      if (!oddsLab || !oddsLab.bookmakers || oddsLab.bookmakers.length === 0) return null;
-
-      let avgOver=0, avgUnder=0, ouCount=0;
-      let avgGG=0, avgNG=0, ggCount=0;
-      let sharpOver=null, sharpUnder=null, sharpGG=null, sharpNG=null;
-
-      oddsLab.bookmakers.forEach(function(bk) {
-        if (bk.ou25 && bk.ou25.over > 1 && bk.ou25.under > 1) {
-          avgOver += bk.ou25.over; avgUnder += bk.ou25.under; ouCount++;
-          if (bk.isSharp && sharpOver == null) { sharpOver = bk.ou25.over; sharpUnder = bk.ou25.under; }
-        }
-        if (bk.btts && bk.btts.yes > 1 && bk.btts.no > 1) {
-          avgGG += bk.btts.yes; avgNG += bk.btts.no; ggCount++;
-          if (bk.isSharp && sharpGG == null) { sharpGG = bk.btts.yes; sharpNG = bk.btts.no; }
-        }
-      });
-      if (ouCount > 0) { avgOver /= ouCount; avgUnder /= ouCount; }
-      if (ggCount > 0) { avgGG /= ggCount; avgNG /= ggCount; }
-
-      // Preferisci sharp (Pinnacle/Bet365/Unibet) se disponibile
-      const ou1 = sharpOver || avgOver;
-      const ou2 = sharpUnder || avgUnder;
-      const gg1 = sharpGG || avgGG;
-      const gg2 = sharpNG || avgNG;
-
-      function implied(o1, o2) {
-        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) return null;
-        const tot = 1/o1 + 1/o2;
-        return { p1: (1/o1/tot)*100, p2: (1/o2/tot)*100 };
+      if (window.BettingProEngine && window.BettingProEngine.Reverse) {
+        return window.BettingProEngine.Reverse.getQuoteForPick(analysis, pickName);
       }
-
-      const pOU = analysis.pOU || {};
-      const pBTTS = analysis.pBTTS || 50;
-      let modelProb, bookProb, market, oppositePick;
-
-      if (/Over 2\.5/i.test(pickName)) {
-        const impl = implied(ou1, ou2); if (!impl) return null;
-        modelProb = (pOU[2.5] && pOU[2.5].over) || 50;
-        bookProb = impl.p1; market = 'Over 2.5'; oppositePick = 'Under 2.5';
-      } else if (/Under 2\.5/i.test(pickName)) {
-        const impl = implied(ou1, ou2); if (!impl) return null;
-        modelProb = (pOU[2.5] && pOU[2.5].under) || 50;
-        bookProb = impl.p2; market = 'Under 2.5'; oppositePick = 'Over 2.5';
-      } else if (/^GG/i.test(pickName)) {
-        const impl = implied(gg1, gg2); if (!impl) return null;
-        modelProb = pBTTS; bookProb = impl.p1; market = 'GG'; oppositePick = 'NG';
-      } else if (/^NG/i.test(pickName)) {
-        const impl = implied(gg1, gg2); if (!impl) return null;
-        modelProb = 100 - pBTTS; bookProb = impl.p2; market = 'NG'; oppositePick = 'GG';
-      } else {
-        return null; // 1X2/1X/X2/X gestiti dal Trap Detector
-      }
-
-      const delta = modelProb - bookProb;
-      return { delta, modelProb, bookProb, market, oppositePick };
+      return null;
     }
 
-    // Confronta il pick 1X2 col mercato (state.bookmakerOdds) per gli stessi
-    // motivi di overconfidence (modello vs mercato sui mercati 1X2).
     function getReverseQuote1X2(analysis, pickName) {
-      const bk = state.bookmakerOdds;
-      if (!bk || !bk.homeOdd || !bk.drawOdd || !bk.awayOdd) return null;
-      const p1X2 = analysis.p1X2 || {};
-
-      function impliedFrom1X2(oH, oD, oA) {
-        const rH = 1/oH, rD = 1/oD, rA = 1/oA;
-        const tot = rH + rD + rA;
-        return { home: (rH/tot)*100, draw: (rD/tot)*100, away: (rA/tot)*100 };
+      if (window.BettingProEngine && window.BettingProEngine.Reverse) {
+        return window.BettingProEngine.Reverse.getQuote1X2(analysis, pickName);
       }
-      const book = impliedFrom1X2(bk.homeOdd, bk.drawOdd, bk.awayOdd);
-
-      let modelProb, bookProb, market;
-      if (/^1 \(|^1$/i.test(pickName))      { modelProb = p1X2.home || 33; bookProb = book.home; market = '1'; }
-      else if (/^2 \(|^2$/i.test(pickName)) { modelProb = p1X2.away || 33; bookProb = book.away; market = '2'; }
-      else if (/^X \(|^X$/i.test(pickName)) { modelProb = p1X2.draw || 33; bookProb = book.draw; market = 'X'; }
-      else if (/^1X/i.test(pickName))       { modelProb = (p1X2.home || 33) + (p1X2.draw || 33); bookProb = book.home + book.draw; market = '1X'; }
-      else if (/^X2/i.test(pickName))       { modelProb = (p1X2.away || 33) + (p1X2.draw || 33); bookProb = book.away + book.draw; market = 'X2'; }
-      else return null;
-
-      return { delta: modelProb - bookProb, modelProb, bookProb, market };
+      return null;
     }
-
-    // Cerca un eventuale consenso/conflitto tra Presagio e l'AI Advice.
-    // Se Presagio (con metriche IRC/MOT/FOR/Tendenza) propone una direzione
-    // opposta, e' un segnale di debolezza interna.
     function getPresagioAlignment(advice, analysis, match) {
       try {
         if (!window.Presagio || typeof window.Presagio.calculate !== 'function') return null;
@@ -7073,263 +6908,20 @@ async function analyzeMatch(match) {
     // 3. REGRESSION SCORE — Multi-factor weighted scoring
     //    Ispirato al metodo regressione di Quanta Predict
     // ============================================================
+    // PATCH V15: codice Regression Score + Consensus Engine estratto in
+    // js/engine-consensus.js. Mantenuti wrapper sottili per compatibilita.
     function calculateRegressionScore(match, analysis, oddsLab) {
-      if (!analysis) return null;
-      
-      const factors = [];
-      let totalScore = 0;
-      let totalWeight = 0;
-      
-      const p1X2 = analysis.p1X2 || { home: 33, draw: 33, away: 33 };
-      const xG = analysis.xG || { home: 1.2, away: 1.0, total: 2.2 };
-      const hD = analysis.homeData || {};
-      const aD = analysis.awayData || {};
-      const bk = analysis.bookmakerOdds || {};
-      const pBTTS = analysis.pBTTS || 50;
-      const pOU = analysis.pOU || {};
-      
-      // Chi è il favorito dal nostro modello
-      const favIs = p1X2.home > p1X2.away ? 'home' : 'away';
-      const favProb = favIs === 'home' ? p1X2.home : p1X2.away;
-      const favXG = favIs === 'home' ? xG.home : xG.away;
-      const undXG = favIs === 'home' ? xG.away : xG.home;
-      
-      // FATTORE 1: Forza Poisson (peso 25%)
-      // Il nostro modello Poisson quanto è convinto?
-      {
-        const w = 25;
-        const score = clamp(0, (favProb - 30) * (100/40), 100); // 30%=0, 70%=100
-        factors.push({ name: '🎯 Forza Poisson', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
+      if (window.BettingProEngine && window.BettingProEngine.Consensus) {
+        return window.BettingProEngine.Consensus.regression(match, analysis, oddsLab);
       }
-      
-      // FATTORE 2: Dominanza xG (peso 20%)
-      {
-        const w = 20;
-        const xgDiff = favXG - undXG;
-        const score = clamp(0, (xgDiff / 1.5) * 100, 100); // Diff 1.5+ = 100
-        factors.push({ name: '⚽ Dominanza xG', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
-      }
-      
-      // FATTORE 3: Conferma Bookmaker (peso 20%)
-      {
-        const w = 20;
-        let score = 50; // default neutro
-        if (oddsLab && oddsLab.consensus) {
-          const bkFavProb = favIs === 'home' ? oddsLab.consensus.home : oddsLab.consensus.away;
-          score = clamp(0, (bkFavProb - 25) * (100/45), 100);
-        } else if (bk && bk.home > 0) {
-          const bkFavProb = favIs === 'home' ? bk.home : bk.away;
-          score = clamp(0, (bkFavProb - 25) * (100/45), 100);
-        }
-        factors.push({ name: '💰 Conferma Quote', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
-      }
-      
-      // FATTORE 4: Forma recente (peso 15%)
-      {
-        const w = 15;
-        const favForm = favIs === 'home' ? (analysis.homeForm || '') : (analysis.awayForm || '');
-        let score = 50;
-        if (favForm.length >= 3) {
-          const recent = favForm.slice(0, 5).split('');
-          const wins = recent.filter(r => r === 'W').length;
-          const losses = recent.filter(r => r === 'L').length;
-          score = clamp(0, ((wins - losses + 2.5) / 5) * 100, 100);
-        }
-        factors.push({ name: '📈 Forma Recente', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
-      }
-      
-      // FATTORE 5: Solidità difensiva (peso 10%)
-      {
-        const w = 10;
-        const favGA = favIs === 'home' ? (hD.goalsAgainst || 1.2) : (aD.goalsAgainst || 1.2);
-        const score = clamp(0, (1.8 - favGA) / 1.5 * 100, 100); // 0.3 GA=100, 1.8+=0
-        factors.push({ name: '🛡️ Difesa', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
-      }
-      
-      // FATTORE 6: Steam Move / Smart Money (peso 10%)
-      {
-        const w = 10;
-        let score = 50;
-        if (oddsLab && oddsLab.steamMoves.length > 0) {
-          const favSteam = oddsLab.steamMoves.find(s => s.direction === favIs && s.type === 'bullish');
-          const undSteam = oddsLab.steamMoves.find(s => s.direction !== favIs && s.type === 'bullish');
-          if (favSteam) {
-            const delta = parseFloat(favSteam.delta);
-            score = isNaN(delta) ? 80 : (80 + delta);
-          }
-          else if (undSteam) score = 20;
-        }
-        score = clamp(0, isNaN(score) ? 50 : score, 100);
-        factors.push({ name: '🔥 Smart Money', score: score.toFixed(0), weight: w, color: score > 65 ? '#00e5a0' : (score > 40 ? '#fbbf24' : '#f87171') });
-        totalScore += score * w;
-        totalWeight += w;
-      }
-      
-      const finalScore = totalWeight > 0 ? totalScore / totalWeight : 50;
-      
-      let grade, gradeColor;
-      if (finalScore >= 80) { grade = 'A+'; gradeColor = '#00e5a0'; }
-      else if (finalScore >= 70) { grade = 'A'; gradeColor = '#00d4ff'; }
-      else if (finalScore >= 60) { grade = 'B+'; gradeColor = '#3b82f6'; }
-      else if (finalScore >= 50) { grade = 'B'; gradeColor = '#fbbf24'; }
-      else if (finalScore >= 40) { grade = 'C'; gradeColor = '#f97316'; }
-      else { grade = 'D'; gradeColor = '#f87171'; }
-      
-      return {
-        score: finalScore.toFixed(0),
-        grade, gradeColor,
-        factors,
-        favIs,
-        favName: favIs === 'home' ? match.home.name : match.away.name,
-        recommendation: finalScore >= 70 ? 'FORTE' : (finalScore >= 55 ? 'GIOCABILE' : 'EVITARE')
-      };
+      return null;
     }
 
-    // ============================================================
-    // 4. CONSENSUS ENGINE — Fusione intelligente di tutte le fonti
-    // ============================================================
     function buildConsensusEngine(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo) {
-      if (!analysis) return null;
-      
-      const sources = [];
-      const pickVotes = {}; // { 'pick': { count, totalWeight, sources } }
-      
-      // Funzione helper per aggiungere un voto
-      function addVote(name, pick, prob, weight, icon) {
-        if (!pick || pick === 'N/A') return;
-        // Normalizza pick AGGRESSIVO — mappa tutte le varianti allo stesso pick canonico
-        const normalizedPick = normalizePick(pick);
-        const src = { name, pick: normalizedPick, prob: parseFloat(prob) || 0, weight, icon };
-        sources.push(src);
-        
-        if (!pickVotes[normalizedPick]) pickVotes[normalizedPick] = { count: 0, totalWeight: 0, maxProb: 0, sources: [] };
-        pickVotes[normalizedPick].count++;
-        pickVotes[normalizedPick].totalWeight += weight;
-        pickVotes[normalizedPick].maxProb = Math.max(pickVotes[normalizedPick].maxProb, src.prob);
-        pickVotes[normalizedPick].sources.push(name);
+      if (window.BettingProEngine && window.BettingProEngine.Consensus) {
+        return window.BettingProEngine.Consensus.build(match, analysis, ai, oddsLab, regressionResult, superAI, superAlgo);
       }
-      
-      function normalizePick(raw) {
-        if (!raw) return raw;
-        const p = raw.trim().toLowerCase();
-        
-        // === Double Chance (PRIMA di X per evitare che "1x casa o pareggio" matchi "pareggio" → X) ===
-        if (/^1x(\s|\(|$)/i.test(p) || p === '1x' || p.includes('casa o pareggio') || p.includes('1x (')) return '1X';
-        if (/^x2(\s|\(|$)/i.test(p) || p === 'x2' || p.includes('pareggio o ospite') || p.includes('x2 (')) return 'X2';
-        if (/^12(\s|$)/i.test(p) || p === '12' || p.includes('no pareggio')) return '12';
-        
-        // === 1X2 ===
-        if (/^1(\s|\(|$)/.test(p) || p.includes('vittoria casa') || p.includes('casa vince') || p.includes('home win')) return '1';
-        if (/^2(\s|\(|$)/.test(p) || p.includes('vittoria ospite') || p.includes('ospite vince') || p.includes('away win')) return '2';
-        if (/^x(\s|\(|$)/.test(p) || p === 'pareggio' || p === 'x (pareggio)' || p === 'draw') return 'X';
-        
-        // === Over/Under ===
-        if (/over\s*0\.?5/i.test(p)) return 'Over 0.5';
-        if (/over\s*1\.?5/i.test(p)) return 'Over 1.5';
-        if (/over\s*2\.?5/i.test(p)) return 'Over 2.5';
-        if (/over\s*3\.?5/i.test(p)) return 'Over 3.5';
-        if (/under\s*0\.?5/i.test(p)) return 'Under 0.5';
-        if (/under\s*1\.?5/i.test(p)) return 'Under 1.5';
-        if (/under\s*2\.?5/i.test(p)) return 'Under 2.5';
-        if (/under\s*3\.?5/i.test(p)) return 'Under 3.5';
-        
-        // === GG/NG ===
-        if (p === 'gg' || p.includes('gol gol') || p.includes('both teams') || p.includes('btts') || p.includes('entrambe segnano')) return 'GG';
-        if (p === 'ng' || p === 'no gol' || p.includes('no gol') || p.includes('no goal')) return 'NG';
-        
-        // Fallback
-        return raw.trim();
-      }
-      
-      // 1. Modello Poisson/Dixon-Coles (peso 3)
-      if (ai && ai.pick) {
-        addVote('Poisson AI', ai.pick, ai.prob, 3, '🎯');
-      }
-      
-      // 2. Bookmaker consensus (peso 3)
-      if (oddsLab && oddsLab.consensus) {
-        const c = oddsLab.consensus;
-        const maxP = Math.max(c.home, c.draw, c.away);
-        const bkPick = c.home === maxP ? '1' : (c.away === maxP ? '2' : 'X');
-        addVote('Bookmakers', bkPick, maxP, 3, '💰');
-      } else if (analysis.bookmakerOdds) {
-        const b = analysis.bookmakerOdds;
-        const maxP = Math.max(b.home, b.draw, b.away);
-        const bkPick = b.home === maxP ? '1' : (b.away === maxP ? '2' : 'X');
-        addVote('Bookmaker', bkPick, maxP, 2.5, '💰');
-      }
-      
-      // 3. Regression Score (peso 2)
-      if (regressionResult && regressionResult.score >= 55) {
-        const rPick = regressionResult.favIs === 'home' ? '1' : '2';
-        addVote('Regressione', rPick, regressionResult.score, 2, '📊');
-      }
-      
-      // 4. Super AI con news (peso 2)
-      if (superAI && !superAI.error && superAI.bestPick) {
-        addVote('Oracle AI', superAI.bestPick, superAI.confidence || 60, 2, '🔮');
-      }
-      
-      // 5. Super Algoritmo locale (peso 2)
-      if (superAlgo && superAlgo.topPick) {
-        addVote('Super Algo', superAlgo.topPick.value, superAlgo.topPick.prob, 2, '⚡');
-      }
-      
-      // 6. Steam Move (peso 1.5)
-      if (oddsLab && oddsLab.steamMoves.length > 0) {
-        const bullish = oddsLab.steamMoves.find(s => s.type === 'bullish');
-        if (bullish) {
-          const steamPick = bullish.direction === 'home' ? '1' : '2';
-          addVote('Smart Money', steamPick, 65, 1.5, '🔥');
-        }
-      }
-      
-      // Trova il pick con il peso cumulativo più alto
-      const sortedPicks = Object.entries(pickVotes)
-        .map(([pick, data]) => ({ pick, ...data, score: data.totalWeight * (data.maxProb / 100) * data.count }))
-        .sort((a, b) => b.score - a.score);
-      
-      if (sortedPicks.length === 0) return null;
-      
-      const winner = sortedPicks[0];
-      const totalSources = sources.length;
-      const agreeSources = sources.filter(s => s.pick === winner.pick).length;
-      const agreement = totalSources > 0 ? (agreeSources / totalSources * 100) : 0;
-      
-      // Confidence calibrata
-      let confidence = 'medium', confidenceColor = '#fbbf24';
-      if (agreement >= 80 && winner.maxProb >= 60) { confidence = 'MASSIMA'; confidenceColor = '#00e5a0'; }
-      else if (agreement >= 60 && winner.maxProb >= 55) { confidence = 'ALTA'; confidenceColor = '#00d4ff'; }
-      else if (agreement >= 40) { confidence = 'MEDIA'; confidenceColor = '#fbbf24'; }
-      else { confidence = 'BASSA'; confidenceColor = '#f87171'; }
-      
-      // Calcola prob ponderata
-      const agreeingSources = sources.filter(s => s.pick === winner.pick);
-      let weightedProb = 0, sumWeights = 0;
-      agreeingSources.forEach(s => { weightedProb += s.prob * s.weight; sumWeights += s.weight; });
-      const finalProb = sumWeights > 0 ? weightedProb / sumWeights : winner.maxProb;
-      
-      return {
-        pick: winner.pick,
-        prob: finalProb.toFixed(1),
-        confidence,
-        confidenceColor,
-        agreement: agreement.toFixed(0),
-        agreeSources,
-        totalSources,
-        sources: sources.map(s => ({ ...s, agrees: s.pick === winner.pick })),
-        alternatives: sortedPicks.slice(1, 3).map(p => ({ pick: p.pick, sources: p.count, prob: p.maxProb.toFixed(0) }))
-      };
+      return null;
     }
 
     // ============================================================
