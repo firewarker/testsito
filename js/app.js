@@ -4175,10 +4175,12 @@ async function analyzeMatch(match) {
         (async () => {
           try {
             const oddsLab = await fetchOddsLab(match.id);
-            state.oddsLab = oddsLab;
+            // PATCH V17.1: distingue "in caricamento" (null) da "API senza quote" (false)
+            // Cosi' la UI puo' mostrare "Quote non disponibili" invece di "Caricamento..." infinito
+            state.oddsLab = oddsLab || false;
             // PATCH V10: registra le quote OU/BTTS reali dall'oddsLab
             if (oddsLab) captureOddsFromLab(match.id, oddsLab);
-            if (oddsLab) state.valueBets = calculateValueBets(cached, oddsLab);
+            state.valueBets = oddsLab ? calculateValueBets(cached, oddsLab) : false;
             state.regressionScore = calculateRegressionScore(match, cached, oddsLab);
             const aiC = generateAIAdvice(match, cached);
             state.consensus = buildConsensusEngine(match, cached, aiC, oddsLab, state.regressionScore, state.superAIAnalysis, state.superAnalysis);
@@ -4343,7 +4345,9 @@ async function analyzeMatch(match) {
         try {
           console.log('🔬 v7: Fetching Odds Lab...');
           const oddsLab = await fetchOddsLab(match.id);
-          state.oddsLab = oddsLab;
+          // PATCH V17.1: stessa logica del cache path (false = tentato ma vuoto)
+          state.oddsLab = oddsLab || false;
+          if (!oddsLab) console.log('ℹ️ v7: Odds Lab non disponibili per questa partita (API senza bookmaker)');
           // PATCH V10: registra quote OU/BTTS reali per il tracking
           if (oddsLab) captureOddsFromLab(match.id, oddsLab);
           
@@ -4351,6 +4355,8 @@ async function analyzeMatch(match) {
           if (oddsLab) {
             state.valueBets = calculateValueBets(state.analysis, oddsLab);
             console.log('✅ v7: Value Bets calcolate,', state.valueBets?.totalValueBets || 0, 'value trovate');
+          } else {
+            state.valueBets = false;
           }
           
           // Regression Score
@@ -12323,7 +12329,9 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>💰</span> Odds Lab — Multi-Bookmaker</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (!state.oddsLab) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              // PATCH V17.1: distingue 3 stati - null=loading, false=no-data, object=ok
+              if (state.oddsLab === null || state.oddsLab === undefined) return '<span style="font-size:0.6rem;color:var(--text-dark);">⏳ Caricamento...</span>';
+              if (state.oddsLab === false) return '<span style="font-size:0.6rem;background:rgba(148,163,184,0.12);color:#94a3b8;padding:2px 8px;border-radius:8px;font-weight:700;">N/D</span>';
               const steamCount = state.oddsLab.steamMoves.filter(s => s.type === 'bullish').length;
               return '<span style="font-size:0.6rem;background:rgba(245,158,11,0.12);color:#f59e0b;padding:2px 8px;border-radius:8px;font-weight:700;">' + state.oddsLab.bookmakers.length + ' book' + (steamCount > 0 ? ' • 🔥' + steamCount + ' steam' : '') + '</span>';
             })()}
@@ -12331,7 +12339,11 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.oddsLab ? safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'}
+          ${state.oddsLab === null || state.oddsLab === undefined
+            ? '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Fetching quote da multi-bookmaker...</div>'
+            : state.oddsLab === false
+              ? '<div style="padding:14px;color:var(--text-dark);font-size:0.78rem;text-align:center;">❌ Quote non disponibili per questa partita.<br><span style="font-size:0.62rem;opacity:0.7;">L\'API-Football non ha bookmaker per questo fixture. Comune per leghe minori o partite oltre 48h.</span></div>'
+              : safeRender(() => renderOddsLab(state.oddsLab), '', 'OddsLab')}
         </div>
       </div>
       
@@ -12341,7 +12353,9 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           <div class="section-accordion-title"><span>🎯</span> Value Bet Engine + Kelly</div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
-              if (!state.valueBets) return '<span style="font-size:0.6rem;color:var(--text-dark);">Caricamento...</span>';
+              // PATCH V17.1: distingue 3 stati
+              if (state.valueBets === null || state.valueBets === undefined) return '<span style="font-size:0.6rem;color:var(--text-dark);">⏳ Caricamento...</span>';
+              if (state.valueBets === false) return '<span style="font-size:0.6rem;background:rgba(148,163,184,0.12);color:#94a3b8;padding:2px 8px;border-radius:8px;font-weight:700;">N/D</span>';
               const count = state.valueBets.totalValueBets;
               return count > 0 
                 ? '<span style="font-size:0.6rem;background:rgba(0,229,160,0.15);color:#00e5a0;padding:2px 8px;border-radius:8px;font-weight:800;">🎯 ' + count + ' VALUE</span>'
@@ -12351,7 +12365,11 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
           </div>
         </div>
         <div class="section-accordion-body">
-          ${state.valueBets ? safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets') : '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'}
+          ${state.valueBets === null || state.valueBets === undefined
+            ? '<div style="padding:14px;color:var(--text-dark);font-size:0.72rem;text-align:center;">⏳ Calcolo Value Bets in corso...</div>'
+            : state.valueBets === false
+              ? '<div style="padding:14px;color:var(--text-dark);font-size:0.78rem;text-align:center;">❌ Value Bets non calcolabili senza quote.<br><span style="font-size:0.62rem;opacity:0.7;">Servono i dati dei bookmaker per individuare value rispetto al modello.</span></div>'
+              : safeRender(() => renderValueBets(state.valueBets), '', 'ValueBets')}
         </div>
       </div>
 
