@@ -169,14 +169,18 @@
   }
 
   function pickOverUnder(pOU) {
-    if (!pOU) return { value: 'Over 1.5', prob: 75 };
+    // PATCH V17: rimosso "Over 1.5" come pick principale.
+    // Le quote di Over 1.5 sono troppo basse (1.20-1.30) per essere
+    // interessanti come pronostico singolo. Il Presagio ora sceglie tra
+    // Over 2.5 / Under 2.5 / Under 3.5 — mercati con quote ~1.5-2.5
+    // davvero utilizzabili nelle multiple e nelle singole.
+    if (!pOU) return { value: 'Over 2.5', prob: 50 };
     const opts = [
-      { value: 'Over 1.5',  prob: safe(pOU[1.5]?.over,  0) },
       { value: 'Over 2.5',  prob: safe(pOU[2.5]?.over,  0) },
       { value: 'Under 2.5', prob: safe(pOU[2.5]?.under, 0) },
       { value: 'Under 3.5', prob: safe(pOU[3.5]?.under, 0) }
     ].filter(o => o.prob > 0);
-    if (!opts.length) return { value: 'Over 1.5', prob: 75 };
+    if (!opts.length) return { value: 'Over 2.5', prob: 50 };
     return opts.reduce((b, c) => c.prob > b.prob ? c : b);
   }
 

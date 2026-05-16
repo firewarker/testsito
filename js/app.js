@@ -1,60 +1,45 @@
 // ===================================================
-    // BETTINGPRO v16 - REFACTORING COMPLETATO (Giudizio estratto)
+    // BETTINGPRO v17 - VERDETTO COMPATTO + RISULTATO ESATTO
     // ===================================================
-    // V16 PATCH (rispetto a V15):
+    // V17 PATCH (rispetto a V16):
     //
-    //   ULTIMO MODULO ESTRATTO — il piu' grosso e importante:
+    //   1. PRESAGIO: rimosso Over 1.5 dalle opzioni
+    //   • presagio.js — pickOverUnder() ora sceglie tra:
+    //     Over 2.5 / Under 2.5 / Under 3.5
+    //   • Over 1.5 e' fuori perche' ha quote troppo basse (1.20-1.30)
+    //     per essere un pronostico interessante.
     //
-    //   • js/engine-giudizio.js (726 righe NUOVO)
-    //     - computeGiudizioFinale (670 righe del corpo + helpers nested)
-    //     - 10 helper nested di scoring:
-    //       * scoreMarket (costruzione mercato con superScore)
-    //       * getPresagioBonus_v11, getRevQuoteBonus_v11,
-    //         getReverseXgBonus_v11, getTrapBonus_v11,
-    //         getConsensusBonus_v11, getRegressionBonus_v11,
-    //         getGapBonus_v11 (i 7 bonus moltiplicativi)
-    //       * getMLWeight, getSuperConf, getSuperScore
-    //     - Espone window.BettingProEngine.Giudizio.compute(...)
-    //     - Dipendenze: window.state, BettingProEngine.Trap, .Reverse,
-    //                   window.Multigol, window.Presagio
+    //   2. VERDETTO BETTINGPRO PIÙ COMPATTO:
+    //   • Padding: 18px 20px → 12px 14px
+    //   • Border-radius: 18px → 14px
+    //   • Font header: 0.7rem → 0.62rem
+    //   • Font pick: 1.5rem → 1.15rem
+    //   • Font prob: 2.2rem → 1.7rem
+    //   • Font coro: 1.8rem → 1.4rem
+    //   • Margini interni ridotti
     //
-    //   app.js: da 14.555 a 13.903 righe (-652, -4.5%).
-    //   In app.js resta SOLO 13 righe di wrapper per computeGiudizioFinale.
+    //   3. NUOVA CASELLA RISULTATO ESATTO:
+    //   • Nella riga sotto, accanto a "Seconda scelta"
+    //   • Mostra risultato esatto piu' probabile da analysis.exactScores[0]
+    //     (es. "2-1") + sua probabilita' (es. "12%")
+    //   • Background verde-cyan per evidenziarlo
+    //   • Tooltip onHover con i top 3 esatti
+    //   • Se non c'e' exactScores, casella nascosta (no breakage)
     //
-    //   TESTATO in isolamento con node con dataset completo:
-    //   Top 10 picks generati correttamente. Top pick "Multigol 1-4" 82%
-    //   coerente con xG totale 2.6. Tutti i moduli si caricano nell'ordine
-    //   giusto via window.BettingProEngine.*
+    //   4. STORICO VARIAZIONI: verificato funzionante
+    //   • Console mostra "Storico salvato: ... 73%" → recordPrediction OK
+    //   • getPredictionHistory(matchId) + renderHistorySection invariati
+    //   • Il refactoring V14-V16 non li ha toccati. Funziona come prima.
     //
-    //   REFACTORING TURNO 4 COMPLETATO:
-    //   Da V13 a V16 abbiamo estratto 5 moduli engine + 1 module math:
-    //     V14 → engine-trap.js (-384)
-    //     V15 → engine-consensus.js + engine-reverse.js (-413)
-    //     V16 → engine-giudizio.js (-652)
-    //   Totale: -1.449 righe da app.js. 9.4% del monolite originale.
-    //   app.js: 15.352 -> 13.903 = -9.4%
+    //   File modificati: app.js (renderHeroVerdetto), presagio.js (pickOverUnder)
     //
-    //   STRUTTURA FINALE (9 file JS):
-    //     app.js               13.903  Orchestrazione, UI, state
-    //     engine-math.js          157  Matematica pura
-    //     engine-trap.js          437  Trap Detector
-    //     engine-consensus.js     296  Consensus + Regression
-    //     engine-reverse.js       229  Reverse xG + Quote
-    //     engine-giudizio.js      726  Giudizio Finale + Coro
-    //     presagio.js             583  Pre-analisi
-    //     multigol.js             147  18 mercati Multigol
-    //     multipla.js             317  Generatore multiple
-    //
-    //   Totale: 16.795 righe in 9 file (vs 15.352 in 1 file di V13).
-    //   app.js ora rappresenta l'83% del codice (era il 100%).
     // ===================================================
     
-    // STORICO V15 → V14 → V13 → V12.2 → V12:
+    // STORICO V16 → V15 → V14 → V13 → V12.2:
+    //   V16: engine-giudizio.js (-635 righe)
     //   V15: engine-consensus.js + engine-reverse.js
-    //   V14: engine-trap.js + migrazione a BettingProMath
+    //   V14: engine-trap.js + migrazione BettingProMath
     //   V13: Crea Multipla + engine-math.js
-    //   V12.2: layout split + multigol.js
-    //   V12: cleanup home + bug fingerprint Verdetto/SuperAI
     
     // ============================================
     // CONFIG
@@ -13508,57 +13493,83 @@ Rispondi ESCLUSIVAMENTE con questo JSON preciso (zero testo fuori dal JSON):
         }
 
         return '' +
-          '<div class="hero-verdetto" style="margin-bottom:18px;background:linear-gradient(135deg,rgba(0,212,255,0.06),rgba(168,85,247,0.06),rgba(0,229,160,0.04));border:1.5px solid rgba(0,212,255,0.22);border-radius:18px;padding:18px 20px;position:relative;overflow:hidden;">' +
+          // PATCH V17: padding ridotto (12px vs 18px), font header piu' piccoli,
+          // aggiunta casella Risultato Esatto sotto la pick. Sezione piu' compatta
+          // per fare spazio al Tachimetro affiancato.
+          '<div class="hero-verdetto" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(0,212,255,0.06),rgba(168,85,247,0.06),rgba(0,229,160,0.04));border:1.5px solid rgba(0,212,255,0.22);border-radius:14px;padding:12px 14px;position:relative;overflow:hidden;">' +
             // Glow accent
             '<div style="position:absolute;top:-30px;right:-30px;width:120px;height:120px;background:radial-gradient(circle,rgba(0,212,255,0.15),transparent 70%);pointer-events:none;"></div>' +
-            // Header
-            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;position:relative;z-index:1;">' +
-              '<span style="font-size:1.3rem;">\u2696\uFE0F</span>' +
+            // Header compatto
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;position:relative;z-index:1;">' +
+              '<span style="font-size:1rem;">\u2696\uFE0F</span>' +
               '<div style="flex:1;">' +
-                '<div style="font-size:0.7rem;font-weight:900;letter-spacing:1.2px;color:#00d4ff;text-transform:uppercase;">Verdetto BettingPro</div>' +
-                '<div style="font-size:0.58rem;color:var(--text-dark);margin-top:1px;">Sintesi armonica di 9 moduli analitici</div>' +
+                '<div style="font-size:0.62rem;font-weight:900;letter-spacing:1px;color:#00d4ff;text-transform:uppercase;">Verdetto BettingPro</div>' +
+                '<div style="font-size:0.5rem;color:var(--text-dark);margin-top:1px;">Sintesi armonica di 9 moduli</div>' +
               '</div>' +
-              '<span style="font-size:0.55rem;background:rgba(168,85,247,0.12);color:#c084fc;padding:3px 8px;border-radius:6px;font-weight:700;letter-spacing:0.5px;">V11</span>' +
+              '<span style="font-size:0.5rem;background:rgba(168,85,247,0.12);color:#c084fc;padding:2px 6px;border-radius:5px;font-weight:700;letter-spacing:0.5px;">V11</span>' +
             '</div>' +
-            // Main body: pick + prob + coro
-            '<div style="display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center;margin-bottom:14px;position:relative;z-index:1;">' +
-              // Pick + prob
+            // Main body: pick + prob | coro
+            '<div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:10px;position:relative;z-index:1;">' +
+              // Pick + prob (compatto)
               '<div>' +
-                '<div style="font-size:0.62rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Pronostico Principale</div>' +
-                '<div style="font-size:1.5rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:6px;">' + top.icon + ' ' + esc(top.value) + '</div>' +
-                '<div style="display:flex;align-items:baseline;gap:10px;">' +
-                  '<div style="font-size:2.2rem;font-weight:900;color:' + probColor + ';line-height:1;">' + top.prob.toFixed(0) + '<span style="font-size:1.2rem;">%</span></div>' +
-                  '<div style="display:flex;flex-direction:column;gap:2px;">' +
-                    '<span style="font-size:0.55rem;background:' + confColor + '20;color:' + confColor + ';padding:3px 8px;border-radius:5px;font-weight:800;letter-spacing:0.5px;">CONF. ' + confLabel + '</span>' +
-                    (top.mlAccuracy ? '<span style="font-size:0.55rem;color:var(--text-dark);padding:0 8px;">ML acc. ' + top.mlAccuracy + '%</span>' : '') +
-                  '</div>' +
+                '<div style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:3px;">Pronostico Principale</div>' +
+                '<div style="font-size:1.15rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:4px;">' + top.icon + ' ' + esc(top.value) + '</div>' +
+                '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">' +
+                  '<div style="font-size:1.7rem;font-weight:900;color:' + probColor + ';line-height:1;">' + top.prob.toFixed(0) + '<span style="font-size:1rem;">%</span></div>' +
+                  '<span style="font-size:0.5rem;background:' + confColor + '20;color:' + confColor + ';padding:2px 6px;border-radius:4px;font-weight:800;letter-spacing:0.4px;">CONF. ' + confLabel + '</span>' +
+                  (top.mlAccuracy ? '<span style="font-size:0.5rem;color:var(--text-dark);">ML ' + top.mlAccuracy + '%</span>' : '') +
                 '</div>' +
               '</div>' +
               // Coro dei moduli
               (coroTot > 0 ? (
-                '<div style="text-align:center;border-left:1px solid rgba(255,255,255,0.06);padding-left:18px;">' +
-                  '<div style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:3px;">\u{1F3B5} Coro Moduli</div>' +
-                  '<div style="font-size:1.8rem;font-weight:900;color:' + coroColor + ';line-height:1;">' + coroN + '<span style="font-size:1rem;color:var(--text-dark);">/' + coroTot + '</span></div>' +
-                  '<div style="font-size:0.55rem;color:' + coroColor + ';font-weight:800;letter-spacing:0.4px;margin-top:2px;">' + coroLabel + '</div>' +
+                '<div style="text-align:center;border-left:1px solid rgba(255,255,255,0.06);padding-left:12px;">' +
+                  '<div style="font-size:0.5rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:2px;">\u{1F3B5} Coro</div>' +
+                  '<div style="font-size:1.4rem;font-weight:900;color:' + coroColor + ';line-height:1;">' + coroN + '<span style="font-size:0.85rem;color:var(--text-dark);">/' + coroTot + '</span></div>' +
+                  '<div style="font-size:0.5rem;color:' + coroColor + ';font-weight:800;letter-spacing:0.3px;margin-top:1px;">' + coroLabel + '</div>' +
                 '</div>'
               ) : '') +
             '</div>' +
-            // Modules pills row
+            // Modules pills row (solo se non compact)
             (modulesPills ? (
-              '<div style="display:flex;flex-wrap:wrap;gap:4px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
+              '<div style="display:flex;flex-wrap:wrap;gap:3px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;margin-bottom:8px;">' +
                 modulesPills +
               '</div>'
             ) : '') +
-            // Alternative pick (second best)
-            (second ? (
-              '<div style="display:flex;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
-                '<span style="font-size:0.55rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.6px;">Seconda scelta</span>' +
-                '<span style="font-size:0.78rem;color:#fff;font-weight:700;">' + second.icon + ' ' + esc(second.value) + '</span>' +
-                '<span style="font-size:0.7rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
-              '</div>'
-            ) : '') +
-            // PATCH V11.3: rimosso bottone CTA "Vedi tutti i 10 pronostici" — era
-            // duplicato del bottone "Giudizio Finale" nell'header della partita.
+            // PATCH V17: NUOVA RIGA con Seconda Scelta + Risultato Esatto
+            (() => {
+              const exactScores = d.exactScores || [];
+              const topExact = exactScores[0];
+              const hasExact = topExact && typeof topExact.h === 'number' && typeof topExact.a === 'number';
+              const exactProb = hasExact ? (topExact.prob || topExact.p || 0) : 0;
+              // 3 risultati piu' probabili per il tooltip
+              const top3Exact = exactScores.slice(0, 3).filter(s => typeof s.h === 'number');
+
+              if (!second && !hasExact) return '';
+
+              return '<div style="display:grid;grid-template-columns:' + (second && hasExact ? '1fr 1fr' : '1fr') + ';gap:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.04);position:relative;z-index:1;">' +
+                // Seconda scelta
+                (second ? (
+                  '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;padding:6px 8px;">' +
+                    '<div style="font-size:0.5rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Seconda scelta</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;">' +
+                      '<span style="font-size:0.78rem;color:#fff;font-weight:700;">' + second.icon + ' ' + esc(second.value) + '</span>' +
+                      '<span style="font-size:0.65rem;font-weight:800;color:' + (second.prob >= 60 ? '#fbbf24' : '#94a3b8') + ';">' + second.prob.toFixed(0) + '%</span>' +
+                    '</div>' +
+                  '</div>'
+                ) : '') +
+                // Risultato Esatto
+                (hasExact ? (
+                  '<div style="background:linear-gradient(135deg,rgba(0,229,160,0.04),rgba(0,212,255,0.04));border:1px solid rgba(0,229,160,0.22);border-radius:8px;padding:6px 8px;" title="' +
+                    top3Exact.map(s => s.h + '-' + s.a + ' ' + ((s.prob||s.p)||0).toFixed(0) + '%').join(' | ') + '">' +
+                    '<div style="font-size:0.5rem;color:var(--text-dark);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">\u{1F3AF} Risultato Esatto</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;">' +
+                      '<span style="font-size:0.95rem;color:#00e5a0;font-weight:900;letter-spacing:1px;">' + topExact.h + '-' + topExact.a + '</span>' +
+                      '<span style="font-size:0.6rem;font-weight:800;color:#00d4ff;">' + exactProb.toFixed(0) + '%</span>' +
+                    '</div>' +
+                  '</div>'
+                ) : '') +
+              '</div>';
+            })() +
           '</div>';
       } catch(e) {
         console.warn('renderHeroVerdetto error:', e);
