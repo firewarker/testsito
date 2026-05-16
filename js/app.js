@@ -1,40 +1,39 @@
 // ===================================================
-    // BETTINGPRO v13 - CREA MULTIPLA + REFACTORING INIZIATO
+    // BETTINGPRO v14 - REFACTORING TURNO 4 (Trap estratto)
     // ===================================================
-    // V13 PATCH (rispetto a V12.2):
+    // V14 PATCH (rispetto a V13):
     //
-    //   TURNO 3 — CREA MULTIPLA AUTOMATICA:
-    //   • Nuovo file js/multipla.js (file separato come Presagio/Multigol)
-    //   • Pannello collassabile in home: "🎰 Crea Multipla Auto"
-    //   • Form: N° eventi (2-6) + Quota target (3x/5x/10x/20x/50x)
-    //   • Algoritmo: per ogni candidato calcola "fitness" = proximityScore
-    //     × qualityScore, dove proximity = exp(-|quotaSintetica - quotaIdeale|·1.5)
-    //     e qualityScore dipende dalla confidence (high=1.0, med=0.85, low=0.65).
-    //     Cosi' i pick con quota piu' vicina al target hanno priorita',
-    //     non quelli con prob piu' alta in assoluto.
-    //   • Output: lista dei pick selezionati + quota composta + prob composta
-    //     + deviation dal target. Tap su un pick apre l'analisi della partita.
-    //   • Usa state.dailyPicks.matchAdvices come fonte dati (gia' pre-calcolato).
+    //   1. MIGRAZIONE app.js → BettingProMath:
+    //   • quickCalc1X2, quickCalcOver, calcMultigol ora sono wrapper sottili
+    //     che delegano a window.BettingProMath.* con fallback inline per
+    //     sicurezza. Stesso output, ma niente piu' duplicazione del codice
+    //     matematico (era anche dentro multigol.js, ora centralizzato).
     //
-    //   TURNO 4 — REFACTORING (passo 1):
-    //   • Nuovo file js/engine-math.js: funzioni matematiche pure condivise
-    //     - poisson, dixonColesTau, calcDixonColesRho
-    //     - buildScoreMatrix(homeXG, awayXG, maxGoals)
-    //     - prob1X2, probOverUnder, probBTTS, probMultigol
-    //   • Esposto su window.BettingProMath (v1.0.0)
-    //   • multigol.js riscritto per usare BettingProMath invece di funzioni
-    //     duplicate inline (passato da 235 a 165 righe, -30%)
-    //   • app.js NON toccato: continua a usare le sue versioni locali per
-    //     stabilita'. Sara' migrato a BettingProMath nei prossimi turni in
-    //     modo graduale e testato.
+    //   2. ESTRAZIONE engine-trap.js (passo importante):
+    //   • calculateTrapScore (270 righe) + generateTrapPick (130 righe)
+    //     spostati FISICAMENTE da app.js a js/engine-trap.js.
+    //   • In app.js restano solo 12 righe di wrapper che delegano a
+    //     window.BettingProEngine.Trap.calculate() e .generatePick().
+    //   • app.js scende da 15.352 a 14.968 righe (-384, -2.5%).
+    //   • Le sole dipendenze esterne (state.superAIAnalysis e state.superAnalysis)
+    //     sono accedute via window.state che e' gia' esposto da V11.
     //
-    //   RESTA DA FARE (turni futuri):
-    //   • Migrazione app.js a usare BettingProMath dove possibile
-    //   • engine-trap.js (estrazione Trap Detector)
-    //   • engine-reverse.js (Reverse xG + Reverse Quote)
-    //   • engine-consensus.js (Consensus + Regression)
-    //   • engine-giudizio.js (computeGiudizioFinale + Coro)
+    //   3. NUOVO PATTERN: window.BettingProEngine.*
+    //   • Namespace per i moduli engine separati. Prossimi moduli (reverse,
+    //     consensus, giudizio) si appenderanno qui.
+    //
+    //   RESTA DA FARE (turni successivi):
+    //   • engine-reverse.js (Reverse xG Protocol + Reverse Quote)
+    //   • engine-consensus.js (Consensus Engine + Regression Score)
+    //   • engine-giudizio.js (computeGiudizioFinale + Coro dei Moduli)
+    //     ↑ Il piu' rischioso, da fare per ultimo
     // ===================================================
+    
+    // STORICO V13 → V12.2 → V12 → V11.3 → V11.2 → V11.1 → V11:
+    //   V13: Crea Multipla + engine-math.js + multigol.js usa BettingProMath
+    //   V12.2: Hero+Tachimetro split, bottoni spostati, multigol.js nuovo
+    //   V12: Cleanup home, fasce orarie, accordion chiuse di default,
+    //        bug fingerprint Verdetto/SuperAI fixed
     
     // ============================================
     // CONFIG
@@ -2133,16 +2132,15 @@
     }
     
     // Calcoli rapidi per picks (senza Dixon-Coles per velocità)
+    // PATCH V13: wrapper che delega a window.BettingProMath.prob1X2
+    // Mantiene la firma compatibile con tutti i call site esistenti.
     function quickCalc1X2(lH, lA) {
-      // Validazione input
+      if (window.BettingProMath) return window.BettingProMath.prob1X2(lH, lA);
+      // Fallback (non dovrebbe mai accadere se engine-math.js e' incluso)
       if (isNaN(lH) || isNaN(lA) || lH < 0 || lA < 0) {
         return { home: 33.33, draw: 33.33, away: 33.33 };
       }
-
-      // PATCH V11.2: applica Dixon-Coles tau (era Poisson puro).
-      // Coerenza con calcExactScores che gia' usava tau.
       const rho = calcDixonColesRho(lH, lA);
-
       let pH = 0, pD = 0, pA = 0;
       for (let i = 0; i <= 5; i++) {
         for (let j = 0; j <= 5; j++) {
@@ -2159,15 +2157,15 @@
       return { home: (pH/t)*100, draw: (pD/t)*100, away: (pA/t)*100 };
     }
     
+    // PATCH V13: wrapper che delega a window.BettingProMath.probOverUnder
     function quickCalcOver(lH, lA, line) {
-      // Validazione input
+      if (window.BettingProMath) {
+        const r = window.BettingProMath.probOverUnder(lH, lA, line);
+        return clamp(10, r.over, 90);
+      }
+      // Fallback
       if (isNaN(lH) || isNaN(lA) || lH < 0 || lA < 0) return 50;
-
-      // PATCH V11.2: applica Dixon-Coles tau e normalizza per coerenza
-      // con calcExactScores. Il tau distorce leggermente la somma totale,
-      // quindi serve dividere per la somma effettiva.
       const rho = calcDixonColesRho(lH, lA);
-
       let pUnder = 0, total = 0;
       for (let i = 0; i <= 5; i++) {
         for (let j = 0; j <= 5; j++) {
@@ -4952,9 +4950,10 @@ async function analyzeMatch(match) {
       return scores.sort((a, b) => b.p - a.p);
     }
 
+    // PATCH V13: wrapper che delega a window.BettingProMath.probMultigol
     function calcMultigol(lH, lA, min, max) {
-      // PATCH V11.2: applica Dixon-Coles tau (era Poisson puro), per coerenza
-      // con calcExactScores e quickCalc1X2/Over.
+      if (window.BettingProMath) return window.BettingProMath.probMultigol(lH, lA, min, max);
+      // Fallback
       const rho = calcDixonColesRho(lH, lA);
       let prob = 0, total = 0;
       for (let i = 0; i <= 6; i++) {
@@ -6803,405 +6802,20 @@ async function analyzeMatch(match) {
     // === TRAP DETECTOR v2 — Indice di rischio trappola migliorato ===
     // 13 fattori + 4 attenuanti. Integra Super AI/Oracle.
     // Legge SOLO dati già calcolati — ZERO impatto sull'algoritmo
+    // PATCH V13: codice Trap Detector estratto in js/engine-trap.js
+    // Mantenuti wrapper sottili per compatibilita con i call site esistenti.
     function calculateTrapScore(match, d, ai) {
-      const traps = [];
-      let totalScore = 0;
-      
-      const hD = d.homeData || {};
-      const aD = d.awayData || {};
-      const p = d.p1X2 || { home: 33, draw: 33, away: 33 };
-      const xG = d.xG || { home: 1.2, away: 1.0, total: 2.2 };
-      const pOU = d.pOU || {};
-      const pBTTS = d.pBTTS || 50;
-      const bk = d.bookmakerOdds || {};
-      
-      // Chi è il favorito?
-      const favIs = p.home > p.away ? 'home' : 'away';
-      const favProb = favIs === 'home' ? p.home : p.away;
-      const undProb = favIs === 'home' ? p.away : p.home;
-      const favName = favIs === 'home' ? match.home.name : match.away.name;
-      const undName = favIs === 'home' ? match.away.name : match.home.name;
-      const favData = favIs === 'home' ? hD : aD;
-      const undData = favIs === 'home' ? aD : hD;
-      const favXG = favIs === 'home' ? xG.home : xG.away;
-      const undXG = favIs === 'home' ? xG.away : xG.home;
-      const favForm = favIs === 'home' ? (d.homeForm || '') : (d.awayForm || '');
-      const undForm = favIs === 'home' ? (d.awayForm || '') : (d.homeForm || '');
-      const favFatigue = favIs === 'home' ? (d.homeFatigue || 1.0) : (d.awayFatigue || 1.0);
-      const undFatigue = favIs === 'home' ? (d.awayFatigue || 1.0) : (d.homeFatigue || 1.0);
-      const favInjuries = favIs === 'home' ? (d.homeInjuries || []) : (d.awayInjuries || []);
-      const undInjuries = favIs === 'home' ? (d.awayInjuries || []) : (d.homeInjuries || []);
-      const favPos = favIs === 'home' ? d.homePosition : d.awayPosition;
-      const undPos = favIs === 'home' ? d.awayPosition : d.homePosition;
-      
-      // Se non c'è un favorito chiaro, nessuna trappola possibile
-      if (favProb < 45) {
-        return { score: 0, level: 'none', label: 'Equilibrata', color: '#64748b', traps: [{ factor: 'Partita equilibrata', detail: 'Nessun favorito chiaro (' + p.home.toFixed(0) + '% / ' + p.away.toFixed(0) + '%). Il concetto di trappola non si applica.', weight: 0, icon: 'ℹ️' }], trapPick: null };
+      if (window.BettingProEngine && window.BettingProEngine.Trap) {
+        return window.BettingProEngine.Trap.calculate(match, d, ai);
       }
-      
-      // === FATTORE 1: Forma gonfiata — vittorie senza dominare ===
-      if (favForm && favForm.length >= 3) {
-        const recent = favForm.slice(0, 5).split('');
-        const wins = recent.filter(function(r) { return r === 'W'; }).length;
-        const losses = recent.filter(function(r) { return r === 'L'; }).length;
-        
-        if (wins >= 3 && favData.goalsFor && favData.goalsFor < 1.5) {
-          var w = 15;
-          totalScore += w;
-          traps.push({ factor: 'Forma gonfiata', detail: favName + ': ' + wins + 'V nelle ultime 5 ma solo ' + favData.goalsFor.toFixed(1) + ' gol/g — vittorie risicate senza dominare.', weight: w, icon: '🎭' });
-        }
-        if (wins >= 3 && favData.goalsAgainst && favData.goalsAgainst >= 1.5) {
-          var w = 10;
-          totalScore += w;
-          traps.push({ factor: 'Vince ma subisce', detail: favName + ': vince spesso ma subisce ' + favData.goalsAgainst.toFixed(1) + ' gol/g — basta un gol per ribaltare.', weight: w, icon: '🎭' });
-        }
-        if (losses >= 2) {
-          var w = 12;
-          totalScore += w;
-          traps.push({ factor: 'Forma in calo', detail: favName + ': ' + losses + ' sconfitte nelle ultime 5. Tendenza negativa.', weight: w, icon: '📉' });
-        }
-      }
-      
-      // === FATTORE 2: H2H scomodo ===
-      const h2h = d.h2hInfo || {};
-      if (h2h.awayMultiplier && h2h.awayMultiplier > 1.05 && favIs === 'home') {
-        var w = 14;
-        totalScore += w;
-        traps.push({ factor: 'H2H sfavorevole', detail: undName + ' ha un buon rendimento storico contro ' + favName + '. Possibile "bestia nera".', weight: w, icon: '👻' });
-      } else if (h2h.homeMultiplier && h2h.homeMultiplier > 1.05 && favIs === 'away') {
-        var w = 14;
-        totalScore += w;
-        traps.push({ factor: 'H2H sfavorevole', detail: undName + ' ha un buon rendimento storico contro ' + favName + '. Possibile "bestia nera".', weight: w, icon: '👻' });
-      }
-      
-      // === FATTORE 3: Motivazione asimmetrica ===
-      if (favPos && undPos) {
-        if (favPos <= 4 && undPos >= 15) {
-          var w = 12;
-          totalScore += w;
-          traps.push({ factor: 'Motivazione asimmetrica', detail: favName + ' (' + favPos + '°) già al sicuro. ' + undName + ' (' + undPos + '°) lotta per la salvezza — motivazione 120%.', weight: w, icon: '🔥' });
-        }
-        if (favPos >= 8 && favPos <= 14 && (undPos <= 5 || undPos >= 17)) {
-          var w = 8;
-          totalScore += w;
-          traps.push({ factor: 'Favorito senza obiettivo', detail: favName + ' (' + favPos + '°) in terra di nessuno. Rischio rilassamento.', weight: w, icon: '😴' });
-        }
-      }
-      
-      // === FATTORE 4: Fatica / Calendario fitto ===
-      if (favFatigue < 0.95) {
-        var w = Math.min(18, Math.round((1 - favFatigue) * 120));
-        totalScore += w;
-        traps.push({ factor: 'Stanchezza favorito', detail: favName + ': calendario fitto, energia ' + (favFatigue * 100).toFixed(0) + '%. Gambe pesanti.', weight: w, icon: '🥵' });
-      }
-      
-      // === FATTORE 5: Clean sheet bassa del favorito ===
-      if (favData.cleanSheetPct != null && favData.cleanSheetPct < 25) {
-        var w = favData.cleanSheetPct < 15 ? 14 : 10;
-        totalScore += w;
-        traps.push({ factor: 'Difesa permeabile', detail: favName + ': porta inviolata solo nel ' + favData.cleanSheetPct.toFixed(0) + '%. L\'underdog troverà il gol.', weight: w, icon: '🚪' });
-      }
-      
-      // === FATTORE 6: Assenze INTELLIGENTI ===
-      // Solo lo squilibrio conta — le assenze di lunga data sono già nei dati
-      {
-        const favInj = favInjuries.length;
-        const undInj = undInjuries.length;
-        const delta = favInj - undInj;
-        
-        if (delta >= 4) {
-          var w = 12;
-          totalScore += w;
-          traps.push({ factor: 'Squilibrio assenze', detail: favName + ': ' + favInj + ' indisponibili vs ' + undInj + ' di ' + undName + ' (Δ' + delta + '). Differenza pesante.', weight: w, icon: '🏥' });
-        } else if (delta >= 2 && favInj >= 3) {
-          var w = 7;
-          totalScore += w;
-          traps.push({ factor: 'Più assenti', detail: favName + ': ' + favInj + ' assenti vs ' + undInj + '. Leggero svantaggio.', weight: w, icon: '🏥' });
-        }
-      }
-      
-      // === FATTORE 7: Quote troppo basse ===
-      // FIX: bk.home è la PROBABILITÀ (0-100), le quote vere sono in bk.homeOdd / bk.awayOdd
-      const bkHomeOdd = (bk.homeOdd && bk.homeOdd > 1) ? parseFloat(bk.homeOdd) : 0;
-      const bkAwayOdd = (bk.awayOdd && bk.awayOdd > 1) ? parseFloat(bk.awayOdd) : 0;
-      const favOdds = favIs === 'home' ? bkHomeOdd : bkAwayOdd;
-      if (favOdds > 0 && favOdds <= 1.30) {
-        var w = 16;
-        totalScore += w;
-        traps.push({ factor: 'Quota troppo bassa', detail: 'Quota @' + favOdds.toFixed(2) + ' — tutti puntano uguale, zero valore. Classica trappola.', weight: w, icon: '💰' });
-      } else if (favOdds > 0 && favOdds <= 1.45) {
-        var w = 8;
-        totalScore += w;
-        traps.push({ factor: 'Quota compressa', detail: 'Quota @' + favOdds.toFixed(2) + ' — profitto minimo anche vincendo.', weight: w, icon: '💰' });
-      }
-      
-      // === FATTORE 8: Gap xG stretto mascherato ===
-      const xgGap = Math.abs(favXG - undXG);
-      if (favProb >= 60 && xgGap < 0.5) {
-        var w = 14;
-        totalScore += w;
-        traps.push({ factor: 'xG ingannatore', detail: 'Prob ' + favProb.toFixed(0) + '% ma xG vicini (' + favXG.toFixed(2) + ' vs ' + undXG.toFixed(2) + '). Più equilibrata di quanto sembra.', weight: w, icon: '📊' });
-      } else if (favProb >= 55 && xgGap < 0.35) {
-        var w = 10;
-        totalScore += w;
-        traps.push({ factor: 'xG equilibrato', detail: 'Gap xG stretto: ' + favXG.toFixed(2) + ' vs ' + undXG.toFixed(2) + '. Il favorito non domina.', weight: w, icon: '📊' });
-      }
-      
-      // === FATTORE 9: "TOO GOOD TO BE TRUE" ===
-      // Quando TUTTO concorda per vittoria facile, il rischio paradossale sale
-      {
-        var perfSignals = 0;
-        if (favProb >= 65) perfSignals++;
-        if (favOdds > 0 && favOdds <= 1.45) perfSignals++;
-        if (favForm && favForm.slice(0, 3) === 'WWW') perfSignals++;
-        if (favXG > undXG * 1.8) perfSignals++;
-        if (favData.winRate && favData.winRate >= 65) perfSignals++;
-        
-        if (perfSignals >= 4) {
-          var w = 14;
-          totalScore += w;
-          traps.push({ factor: 'Troppo facile?', detail: 'Prob ' + favProb.toFixed(0) + '%, quota bassa, forma perfetta, xG dominante — quando tutto è "troppo bello" il rischio upset è massimo. Le partite facili non esistono.', weight: w, icon: '🪤' });
-        } else if (perfSignals === 3) {
-          var w = 8;
-          totalScore += w;
-          traps.push({ factor: 'Eccessiva sicurezza', detail: 'Troppi segnali positivi concordano (' + perfSignals + '/5). Attenzione alla sindrome "partita già vinta".', weight: w, icon: '🪤' });
-        }
-      }
-      
-      // === FATTORE 10: Momentum underdog ===
-      // Se l'underdog sta migliorando è molto più pericoloso
-      if (undForm && undForm.length >= 4) {
-        const undRecent = undForm.slice(0, 5).split('');
-        const undFirst2 = undRecent.slice(0, 2);
-        const undLast3 = undRecent.slice(2);
-        const undRecentPts = undFirst2.reduce(function(s, r) { return s + (r === 'W' ? 3 : r === 'D' ? 1 : 0); }, 0);
-        const undOlderPts = undLast3.reduce(function(s, r) { return s + (r === 'W' ? 3 : r === 'D' ? 1 : 0); }, 0);
-        const undOlderAvg = undLast3.length > 0 ? undOlderPts / undLast3.length : 1;
-        const undRecentAvg = undFirst2.length > 0 ? undRecentPts / undFirst2.length : 1;
-        
-        if (undRecentAvg > undOlderAvg + 0.5 && undRecentPts >= 4) {
-          var w = 12;
-          totalScore += w;
-          traps.push({ factor: 'Underdog in crescita', detail: undName + ': trend in netto miglioramento (' + undFirst2.join('') + ' vs ' + undLast3.join('') + '). Avversario pericoloso.', weight: w, icon: '📈' });
-        } else if (undRecentAvg > undOlderAvg && undData.goalsFor >= 1.3) {
-          var w = 7;
-          totalScore += w;
-          traps.push({ factor: 'Underdog in ripresa', detail: undName + ': forma in miglioramento e segna ' + undData.goalsFor.toFixed(1) + ' gol/g. Da non sottovalutare.', weight: w, icon: '📈' });
-        }
-      }
-      
-      // === FATTORE 11: Gap fisico (underdog riposato) ===
-      if (favFatigue < 0.97 && undFatigue >= 1.0) {
-        const fatigueGap = undFatigue - favFatigue;
-        if (fatigueGap >= 0.06) {
-          var w = 10;
-          totalScore += w;
-          traps.push({ factor: 'Gap fisico', detail: undName + ' riposato, ' + favName + ' affaticato. Differenza energia: ' + (fatigueGap * 100).toFixed(0) + '%.', weight: w, icon: '🏃' });
-        }
-      }
-      
-      // === FATTORE 12: SUPER AI WARNING FLAGS ===
-      const superAI = state.superAIAnalysis;
-      if (superAI && !superAI.error) {
-        const warnings = (superAI.warningFlags || []).filter(function(wf) { return wf && wf.length > 2; });
-        if (warnings.length > 0) {
-          var w = Math.min(15, warnings.length * 6);
-          totalScore += w;
-          traps.push({ factor: 'Alert Oracle AI', detail: warnings.join(' | '), weight: w, icon: '🧠' });
-        }
-        if (superAI.recommendation === 'SKIP') {
-          var w = 12;
-          totalScore += w;
-          traps.push({ factor: 'Oracle consiglia SKIP', detail: 'L\'analisi AI con news suggerisce di evitare questa partita.', weight: w, icon: '🛑' });
-        }
-        if (superAI.riskLevel === 'alto') {
-          var w = 10;
-          totalScore += w;
-          traps.push({ factor: 'Rischio AI alto', detail: 'Oracle AI classifica il rischio come ALTO sulla base delle news.', weight: w, icon: '⚡' });
-        }
-      }
-      
-      // === FATTORE 13: Bassa convergenza Super Algoritmo ===
-      const superAlgo = state.superAnalysis;
-      if (superAlgo && superAlgo.picks && superAlgo.picks.length > 0) {
-        if (superAlgo.avgConvergence < 0.45) {
-          var w = 10;
-          totalScore += w;
-          traps.push({ factor: 'Segnali discordanti', detail: 'Super Algoritmo: convergenza ' + (superAlgo.avgConvergence * 100).toFixed(0) + '%. I segnali non concordano.', weight: w, icon: '🔀' });
-        }
-      }
-      
-      // === ATTENUANTE 1: Underdog sterile ===
-      if (undData.failedToScorePct > 40) {
-        totalScore -= 8;
-        traps.push({ factor: 'Underdog sterile', detail: undName + ': non segna nel ' + undData.failedToScorePct.toFixed(0) + '% delle partite. Poco pericoloso.', weight: -8, icon: '🛡️' });
-      }
-      
-      // === ATTENUANTE 2: Dominio reale del favorito ===
-      if (favForm && favForm.length >= 5) {
-        const fRecent = favForm.slice(0, 5).split('');
-        const fWins = fRecent.filter(function(r) { return r === 'W'; }).length;
-        if (fWins >= 4 && favData.goalsFor >= 2.0 && favData.goalsAgainst < 1.2) {
-          totalScore -= 12;
-          traps.push({ factor: 'Dominio reale', detail: favName + ': ' + fWins + 'V/5, segna ' + favData.goalsFor.toFixed(1) + ' e subisce solo ' + favData.goalsAgainst.toFixed(1) + '. Forma autentica.', weight: -12, icon: '🛡️' });
-        }
-      }
-      
-      // === ATTENUANTE 3: Oracle AI conferma con alta fiducia ===
-      if (superAI && !superAI.error && superAI.confidence >= 75 && superAI.algoConfirmed) {
-        totalScore -= 8;
-        traps.push({ factor: 'Oracle AI conferma', detail: 'L\'AI con news conferma il pronostico con ' + superAI.confidence + '% di confidenza.', weight: -8, icon: '🛡️' });
-      }
-      
-      // === ATTENUANTE 4: Underdog in crisi nera ===
-      if (undForm && undForm.length >= 4) {
-        const uRecent = undForm.slice(0, 4).split('');
-        const uLosses = uRecent.filter(function(r) { return r === 'L'; }).length;
-        if (uLosses >= 3 && undData.goalsFor < 0.8) {
-          totalScore -= 10;
-          traps.push({ factor: 'Underdog in crisi', detail: undName + ': ' + uLosses + ' sconfitte su 4 e segna solo ' + undData.goalsFor.toFixed(1) + ' gol/g. In crisi totale.', weight: -10, icon: '🛡️' });
-        }
-      }
-      
-      // Normalizza 0-100
-      totalScore = Math.max(0, Math.min(100, totalScore));
-      
-      // Ordina: rischi prima (peso alto), poi attenuanti (negativi)
-      traps.sort(function(a, b) { return b.weight - a.weight; });
-      
-      var level, label, color;
-      if (totalScore <= 20) { level = 'safe'; label = 'SICURA'; color = '#10b981'; }
-      else if (totalScore <= 40) { level = 'caution'; label = 'ATTENZIONE'; color = '#fbbf24'; }
-      else if (totalScore <= 60) { level = 'risk'; label = 'RISCHIO'; color = '#f97316'; }
-      else { level = 'trap'; label = 'TRAPPOLA'; color = '#ef4444'; }
-      
-      // === PRONO DEL TRAP ===
-      const trapPick = generateTrapPick(totalScore, level, match, d, ai, favIs, favName, undName, favXG, undXG, favProb, pOU, pBTTS, superAI, superAlgo);
-      
-      return { score: totalScore, level, label, color, traps, trapPick, favName, undName, favProb, favOdds };
+      return { score: 0, level: "none", label: "N/A", color: "#64748b", traps: [], trapPick: null };
     }
-    // === PRONO DEL TRAP — Pronostico intelligente anti-trappola ===
+
     function generateTrapPick(trapScore, trapLevel, match, d, ai, favIs, favName, undName, favXG, undXG, favProb, pOU, pBTTS, superAI, superAlgo) {
-      const p = d.p1X2 || { home: 33, draw: 33, away: 33 };
-      const totXG = (d.xG || {}).total || 2.2;
-      const result = { pick: '', prob: 0, reasoning: '', strategy: '', confidence: 'medium', alternatives: [] };
-      
-      // Raccogli i pick da tutte le fonti
-      const aiPick = ai ? ai.pick : '';
-      const oraclePick = (superAlgo && superAlgo.topPick) ? superAlgo.topPick.value : '';
-      const aiNewsPick = (superAI && !superAI.error) ? (superAI.bestPick || '') : '';
-      
-      // Se trap è bassa: conferma il pick principale con extra fiducia
-      if (trapLevel === 'safe') {
-        result.pick = aiPick || oraclePick || 'Over 1.5';
-        result.prob = ai ? ai.prob : 65;
-        result.reasoning = 'Nessun segnale di trappola. Il pronostico principale è affidabile.';
-        result.strategy = 'Via libera per singole e multiple.';
-        result.confidence = 'high';
-        // Aggiungi conferma fonti
-        if (oraclePick && aiNewsPick) {
-          const allAgree = aiPick.toLowerCase().includes(oraclePick.toLowerCase().split(' ')[0]) || oraclePick.toLowerCase().includes(aiPick.toLowerCase().split(' ')[0]);
-          if (allAgree) result.reasoning = 'Tutte le fonti concordano e nessun segnale di trappola. Massima fiducia.';
-        }
-        return result;
+      if (window.BettingProEngine && window.BettingProEngine.Trap) {
+        return window.BettingProEngine.Trap.generatePick(trapScore, trapLevel, match, d, ai, favIs, favName, undName, favXG, undXG, favProb, pOU, pBTTS, superAI, superAlgo);
       }
-      
-      // Se trap è TRAPPOLA o RISCHIO: suggerisci mercato sicuro
-      if (trapLevel === 'trap' || trapLevel === 'risk') {
-        // Strategia: evita esiti secchi (1, X, 2), preferisci mercati "proteggibili"
-        const candidates = [];
-        
-        // Under 3.5 quasi sempre sicuro in partite trappola (poca qualità, tensione)
-        if (pOU && pOU[3.5]) {
-          candidates.push({ pick: 'Under 3.5', prob: pOU[3.5].under, reason: 'Le partite trappola tendono ad essere bloccate — tensione alta, pochi gol.' });
-        }
-        
-        // Double chance del favorito (copertura pareggio)
-        const dcPick = favIs === 'home' ? '1X' : 'X2';
-        const dcProb = favIs === 'home' ? p.home + p.draw : p.away + p.draw;
-        candidates.push({ pick: dcPick, prob: dcProb, reason: 'Double chance copre il pareggio — il favorito potrebbe non vincere ma difficilmente crolla del tutto.' });
-        
-        // Over 1.5 (quasi sempre passa)
-        if (pOU && pOU[1.5] && pOU[1.5].over >= 70) {
-          candidates.push({ pick: 'Over 1.5', prob: pOU[1.5].over, reason: 'Almeno 2 gol sono probabili anche nelle trappole. Mercato sicuro.' });
-        }
-        
-        // GG se entrambe segnano spesso
-        if (pBTTS >= 55 && favXG > 0.9 && undXG > 0.9) {
-          candidates.push({ pick: 'GG', prob: pBTTS, reason: 'Entrambe segnano — l\'underdog motivato trova il gol, il favorito reagisce.' });
-        }
-        
-        // Under 2.5 se partita è davvero bloccata
-        if (totXG < 2.3 && pOU && pOU[2.5]) {
-          candidates.push({ pick: 'Under 2.5', prob: pOU[2.5].under, reason: 'xG totale basso (' + totXG.toFixed(2) + ') + tensione da trappola = pochi gol.' });
-        }
-        
-        // Ordina per probabilità
-        candidates.sort((a, b) => b.prob - a.prob);
-        
-        if (candidates.length > 0) {
-          const best = candidates[0];
-          result.pick = best.pick;
-          result.prob = best.prob;
-          result.reasoning = best.reason;
-          result.confidence = trapLevel === 'trap' ? 'high' : 'medium';
-          result.strategy = trapLevel === 'trap' 
-            ? '🚫 NON giocare il favorito secco. Usa questo pick sicuro o evita la partita.'
-            : '⚡ Il favorito secco è rischioso. Questo pick gestisce il rischio.';
-          result.alternatives = candidates.slice(1, 3).map(c => ({ pick: c.pick, prob: c.prob.toFixed(0) }));
-        }
-        return result;
-      }
-      
-      // Se trap è ATTENZIONE: pick "ammorbidito"
-      // Mantieni l'area del pick principale ma proteggi
-      const candidates = [];
-      
-      // Se il pick AI è un esito secco (1, 2), suggerisci double chance
-      if (aiPick && (aiPick.includes('Casa') || aiPick.includes('Ospite') || aiPick === '1' || aiPick === '2')) {
-        const dcPick = (aiPick.includes('Casa') || aiPick === '1') ? '1X' : 'X2';
-        const dcProb = (aiPick.includes('Casa') || aiPick === '1') ? p.home + p.draw : p.away + p.draw;
-        candidates.push({ pick: dcPick, prob: dcProb, reason: 'Il favorito è dato vincente ma i segnali di attenzione suggeriscono di coprire il pareggio.' });
-      }
-      
-      // Over 1.5 + Under 3.5 combo sicura
-      if (pOU && pOU[1.5] && pOU[3.5]) {
-        const o15 = pOU[1.5].over;
-        const u35 = pOU[3.5].under;
-        if (o15 >= 72 && u35 >= 60) {
-          candidates.push({ pick: 'Over 1.5', prob: o15, reason: 'Mercato gol sicuro — almeno 2 gol sono molto probabili.' });
-        }
-      }
-      
-      // GG come alternativa
-      if (pBTTS >= 55) {
-        candidates.push({ pick: 'GG', prob: pBTTS, reason: 'Entrambe segnano — copre sia vittoria che pareggio con gol.' });
-      }
-      
-      // Conferma AI se disponibile
-      if (aiNewsPick && candidates.length === 0) {
-        candidates.push({ pick: aiNewsPick, prob: (superAI || {}).bestPickProb || 60, reason: 'Oracle AI suggerisce questo pick basandosi anche sulle news.' });
-      }
-      
-      candidates.sort((a, b) => b.prob - a.prob);
-      
-      if (candidates.length > 0) {
-        const best = candidates[0];
-        result.pick = best.pick;
-        result.prob = best.prob;
-        result.reasoning = best.reason;
-        result.confidence = 'medium';
-        result.strategy = '⚠️ Giocabile con cautela. Evita nelle multiple da 3+.';
-        result.alternatives = candidates.slice(1, 3).map(c => ({ pick: c.pick, prob: c.prob.toFixed(0) }));
-      } else {
-        result.pick = aiPick || 'Over 1.5';
-        result.prob = ai ? ai.prob : 65;
-        result.reasoning = 'Segnali di attenzione limitati. Il pick principale resta valido.';
-        result.confidence = 'medium';
-        result.strategy = '✓ Giocabile come singola.';
-      }
-      
-      return result;
+      return { pick: "Over 1.5", prob: 65, reasoning: "Trap Detector non disponibile", strategy: "", confidence: "medium", alternatives: [] };
     }
     
     // ================================================================
