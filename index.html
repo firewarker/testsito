@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="BettingPro">
     <meta name="theme-color" content="#080c14">
-    <title>BettingPro - AI Betting Intelligence V15</title>
+    <title>BettingPro - AI Betting Intelligence V16</title>
 
     <!-- === FAVICON & APP ICONS === -->
     <!-- NOTA: site.webmanifest rimosso per evitare errore CORS con Cloudflare Access.
@@ -42,6 +42,9 @@
     <script src="js/engine-reverse.js"></script>
     <script src="js/presagio.js"></script>
     <script src="js/multigol.js"></script>
+    <!-- engine-giudizio.js: il cuore del sistema. Carica per ULTIMO perche'
+         dipende da tutti i moduli sopra (Trap, Consensus, Reverse, Multigol, Presagio) -->
+    <script src="js/engine-giudizio.js"></script>
     <script src="js/multipla.js"></script>
 </body>
 </html>
